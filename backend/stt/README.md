@@ -23,16 +23,26 @@
 기능정의서.pdf/PRD.pdf/ADR.pdf/TDD.pdf(2026-07-13, v1.0 MVP)를 정본으로 구현. **두 STT 경로 모두 존재하며
 동일한 중간 포맷으로 수렴**(`merge()`/`wrap_segments()`) — chunking/graphrag는 이 스키마 하나만 알면 됨.
 
+### 정식 경로 (ADR-005 정합 — 운영 대상)
+
 | 파일 | 역할 |
 | --- | --- |
 | `ppt_extractor.py` | PPTX 슬라이드 텍스트+노트 추출 |
-| `keyword_prompt.py` | 키워드 3요소 스코어링(자료 내 빈도 + 과거 빈도·최근성 + 일반 사전 대비 특이도) → Whisper `initial_prompt` |
-| `stt_whisper.py` | faster-whisper 전사 (`transcribe`/`transcribe_with_materials`) — **로컬 검증 경로**, ADR-005의 의도적·임시 예외(비용 절감, CLAUDE.md 참고) |
-| `diarize_pyannote.py` | pyannote.audio 화자분리 — 위와 같은 이유로 로컬 검증 한정 |
+| `keyword_prompt.py` | 키워드 3요소 스코어링(자료 내 빈도 + 과거 빈도·최근성 + 일반 사전 대비 특이도) → STT 프롬프트 |
 | `stt_clova.py` | **ADR-005 정합 경로** — CLOVA Speech 관리형 API, 전사+화자분리 한 번의 호출로 완료 |
-| `stt_normalizer.py` | `merge()`(Whisper+pyannote 겹침 매칭) / `wrap_segments()`(CLOVA 등 이미 화자분리된 소스) / `validate()` — 최종 중간 포맷 JSON 출력 |
+| `stt_normalizer.py` | `wrap_segments()`(CLOVA 등 이미 화자분리된 소스 → 중간 포맷)/`validate()`. **`merge()`는 아래 로컬 검증 전용 도구**(같은 파일에 있지만 용도가 다름) |
 | `refine_transcript.py` | Stage 2: OpenAI(gpt-4o) 기반 RAG 정제. pgvector 없어 지금은 컨텍스트 전량 투입(아래 알려진 제약 참고) |
 | `wer.py` | WER 계산(Levenshtein 기반 단어 단위) — Step 0 품질 검증용 |
+
+### 로컬 검증 전용 (ADR-005의 의도적·임시 예외 — `synapvox_Local`에서 계속 실험, 운영 미사용)
+
+| 파일 | 역할 |
+| --- | --- |
+| `stt_whisper.py` | faster-whisper 전사 (`transcribe`/`transcribe_with_materials`) — 비용 절감 목적의 로컬 검증 경로 (CLAUDE.md 참고) |
+| `diarize_pyannote.py` | pyannote.audio 화자분리 — 위와 같은 이유로 로컬 검증 한정 |
+| `stt_normalizer.merge()` | Whisper 세그먼트 + pyannote 화자분리 결과를 겹침 매칭으로 합침 — 위 두 파일과만 짝지어 쓰이는 글루 코드, 관리형 API 경로에선 불필요 |
+
+운영 전환 시 이 그룹 전체(Whisper+pyannote+`merge()`)가 걷어내질 수 있는 부품 — 새 기능을 여기에 추가로 투자하지 말 것.
 
 ### 실제 데이터 검증 결과 (2026-04-02 보건복지위원회 전체회의, 15분02초, 화자 7명)
 
