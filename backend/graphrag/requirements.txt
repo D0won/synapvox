@@ -1,0 +1,3 @@
+# graphrag 모듈 의존성
+neo4j>=5.26
+chromadb>=0.5
