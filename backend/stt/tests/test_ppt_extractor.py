@@ -3,8 +3,12 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3]))  # repo root
 
+import io
+
+from PIL import Image
 from pptx import Presentation
 
+import backend.stt.ppt_extractor as ppt_extractor
 from backend.stt.ppt_extractor import extract_pptx
 
 
@@ -52,3 +56,40 @@ def test_extract_pptx_empty_deck(tmp_path):
 
     assert result["source"] == "empty.pptx"
     assert result["slides"] == []
+
+
+def _make_pptx_with_picture(path):
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])  # blank layout
+
+    image_buf = io.BytesIO()
+    Image.new("RGB", (10, 10), color="red").save(image_buf, format="PNG")
+    image_buf.seek(0)
+    slide.shapes.add_picture(image_buf, left=0, top=0)
+
+    prs.save(path)
+
+
+def test_extract_pptx_describes_picture_shapes(tmp_path, monkeypatch):
+    pptx_path = tmp_path / "with_image.pptx"
+    _make_pptx_with_picture(pptx_path)
+
+    monkeypatch.setattr(ppt_extractor, "describe_image", lambda blob, content_type: "2026년 예산 차트")
+
+    result = extract_pptx(str(pptx_path))
+
+    assert "[이미지 설명: 2026년 예산 차트]" in result["slides"][0]["text"]
+
+
+def test_extract_pptx_skips_image_description_when_disabled(tmp_path, monkeypatch):
+    pptx_path = tmp_path / "with_image.pptx"
+    _make_pptx_with_picture(pptx_path)
+
+    def _fail_if_called(*args, **kwargs):
+        raise AssertionError("describe_image should not be called when describe_images=False")
+
+    monkeypatch.setattr(ppt_extractor, "describe_image", _fail_if_called)
+
+    result = extract_pptx(str(pptx_path), describe_images=False)
+
+    assert result["slides"][0]["text"] == ""

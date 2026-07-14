@@ -2,13 +2,15 @@
 
 integration 계층(D) 및 chunking(B)이 소비하는 공개 API:
 
-    from backend.stt import extract_pptx, resolve_prompt, merge, wrap_segments, validate
+    from backend.stt import extract_pptx, extract_pdf, resolve_prompt, merge, wrap_segments, validate
     from backend.stt.stt_clova import transcribe as clova_transcribe
     from backend.stt.stt_whisper import transcribe_with_materials
     from backend.stt.diarize_pyannote import diarize
     from backend.stt.refine_transcript import refine_transcript
 
-    material = extract_pptx("slides.pptx")  # 또는 pdfplumber 등으로 별도 추출한 PDF 텍스트
+    material = extract_pptx("slides.pptx")  # 또는 extract_pdf("자료.pdf") — 둘 다 임베딩 이미지를
+                                             # GPT-4o Vision으로 설명해 텍스트에 인라인 포함(비용 발생,
+                                             # describe_images=False로 끌 수 있음)
 
     # 경로 A — 관리형 API (ADR-005 정합, 운영 권장): 전사+화자분리 한 번에
     raw = clova_transcribe("meeting.m4a")
@@ -38,6 +40,7 @@ integration 계층(D) 및 chunking(B)이 소비하는 공개 API:
 # dependency-light modules are re-exported here; import the others directly from their
 # submodule (see usage example above).
 from .ppt_extractor import extract_pptx
+from .pdf_extractor import extract_pdf
 from .keyword_prompt import (
     build_prompt,
     build_roster_hint,
@@ -49,7 +52,7 @@ from .stt_normalizer import merge, validate, wrap_segments
 from .wer import word_error_rate
 
 __all__ = [
-    "extract_pptx",
+    "extract_pptx", "extract_pdf",
     "build_prompt", "build_roster_hint", "extract_keywords",
     "extract_keywords_from_past_meetings", "resolve_prompt",
     "merge", "validate", "wrap_segments",

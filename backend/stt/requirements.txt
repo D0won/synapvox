@@ -5,3 +5,5 @@ pyannote.audio
 kiwipiepy
 requests
 openai
+pdfplumber
+pymupdf
