@@ -27,7 +27,9 @@
 
 | 파일 | 역할 |
 | --- | --- |
-| `ppt_extractor.py` | PPTX 슬라이드 텍스트+노트 추출 |
+| `ppt_extractor.py` | PPTX 슬라이드 텍스트+노트 추출 + 임베딩 이미지 설명(`image_description.py`) |
+| `pdf_extractor.py` | PDF 텍스트(`pdfplumber`) + 임베딩 이미지 설명 추출 — 2026-07-14 신규(그전엔 PDF 추출기 자체가 없었음, 아래 참고) |
+| `image_description.py` | GPT-4o Vision으로 이미지(차트/표/스크린샷)를 한국어로 설명 — OCR 대체. PPTX/PDF 추출기가 공용으로 사용 |
 | `keyword_prompt.py` | 키워드 3요소 스코어링(자료 내 빈도 + 과거 빈도·최근성 + 일반 사전 대비 특이도) → STT 프롬프트 |
 | `stt_clova.py` | **ADR-005 정합 경로** — CLOVA Speech 관리형 API, 전사+화자분리 한 번의 호출로 완료 |
 | `stt_normalizer.py` | `wrap_segments()`(CLOVA 등 이미 화자분리된 소스 → 중간 포맷)/`validate()`. **`merge()`는 아래 로컬 검증 전용 도구**(같은 파일에 있지만 용도가 다름) |
@@ -57,6 +59,7 @@
 
 ### 알려진 제약 (다음 사람이 이어받을 때 참고)
 
+- **PDF 추출기/이미지 설명은 2026-07-14 신규 — 그전까지 진짜 갭이었음** — 사용자 질문("이미지 있어도 제대로 처리되는거지?")으로 발견: PDF 자료 추출기가 아예 없었고(기능정의서는 PDF·PPTX 둘 다 요구), PPTX 추출기도 이미지 도형을 조용히 건너뛰고 있었음. `image_description.py`(GPT-4o Vision)로 해소 — 라이브 검증 결과 한글 텍스트가 든 이미지를 정확히 읽어냄 확인(단, 첫 시도는 테스트 이미지의 폰트가 한글 미지원이라 실패했었음 — 실제 기능 문제 아니었음). `describe_images=False`로 끄면 비용 없이 텍스트만 추출(구 동작).
 - **실제 회의자료(PPT/PDF) 기반 키워드 주입·정제는 미검증** — 위 결과는 전부 국회 회의록(자료 없음) 기준. `build_prompt(material_text=...)`/`refine_transcript(material_text=...)`가 실제로 도메인 용어 정확도를 끌어올리는지는 자료 있는 케이스로 별도 검증 필요(PRD §9 수용 기준의 일부가 여기 해당).
 - **`stt_clova.py`의 `boostings` 연동, 효과 미입증** — `transcribe_with_materials()`가 `keyword_prompt.build_prompt()` 결과를 CLOVA `boostings` 파라미터에 주입하도록 구현됨(NCP 문서는 `/recognizer/object-storage`에서만 이 필드를 명시하지만, 우리가 쓰는 `/recognizer/upload`도 라이브 호출로 정상 수락 확인). 다만 실제 WER 개선 효과는 아직 못 봤음 — CLOVA가 현재도 오인식하는 실제 도메인 용어가 있는 테스트 케이스가 있어야 제대로 검증 가능(위 "실제 회의자료 미검증" 항목과 같은 근본 원인).
 - **긴 오디오(1시간 이상) 미검증** — 위 수치는 15분 분량 기준. 같은 전체회의의 1부(1시간46분50초)는 아직 CLOVA로 실행 안 함.
