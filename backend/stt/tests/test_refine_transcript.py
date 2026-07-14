@@ -6,7 +6,14 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3]))  # repo roo
 
 import pytest
 
-from backend.stt.refine_transcript import _parse_llm_output, build_refinement_prompt
+from backend.stt.refine_transcript import (
+    _chunk_text,
+    _cosine_similarity,
+    _parse_llm_output,
+    _rank_chunks,
+    build_refinement_prompt,
+    retrieve_relevant_context,
+)
 
 SEGMENTS = [
     {"id": 0, "speaker": "A", "start": 0.0, "end": 2.0, "text": "추가경영예산안을 논의합니다"},
@@ -59,3 +66,80 @@ def test_parse_llm_output_rejects_missing_segments_key():
 def test_parse_llm_output_rejects_invalid_json():
     with pytest.raises(json.JSONDecodeError):
         _parse_llm_output("not json", expected_ids={0})
+
+
+def test_chunk_text_splits_by_paragraph():
+    text = "첫 번째 문단입니다.\n\n두 번째 문단입니다."
+
+    assert _chunk_text(text) == ["첫 번째 문단입니다.", "두 번째 문단입니다."]
+
+
+def test_chunk_text_splits_long_paragraph_into_fixed_windows():
+    text = "가" * 700
+
+    chunks = _chunk_text(text, chunk_size=300)
+
+    assert len(chunks) == 3
+    assert chunks[0] == "가" * 300
+
+
+def test_chunk_text_empty_returns_empty_list():
+    assert _chunk_text(None) == []
+    assert _chunk_text("") == []
+    assert _chunk_text("   ") == []
+
+
+def test_cosine_similarity_identical_vectors_is_one():
+    assert _cosine_similarity([1.0, 0.0], [1.0, 0.0]) == pytest.approx(1.0)
+
+
+def test_cosine_similarity_orthogonal_vectors_is_zero():
+    assert _cosine_similarity([1.0, 0.0], [0.0, 1.0]) == pytest.approx(0.0)
+
+
+def test_rank_chunks_returns_most_similar_first():
+    candidates = [("material", "A"), ("material", "B"), ("material", "C")]
+    embeddings = [[1.0, 0.0], [0.0, 1.0], [0.9, 0.1]]
+    query = [1.0, 0.0]
+
+    ranked = _rank_chunks(candidates, embeddings, query, top_k=2)
+
+    assert ranked == [("material", "A"), ("material", "C")]
+
+
+class _FakeEmbeddingsAPI:
+    def __init__(self, embedding_map):
+        self._embedding_map = embedding_map
+
+    def create(self, model, input):
+        data = [type("EmbeddingObj", (), {"embedding": self._embedding_map[text]})() for text in input]
+        return type("Response", (), {"data": data})()
+
+
+class _FakeClient:
+    def __init__(self, embedding_map):
+        self.embeddings = _FakeEmbeddingsAPI(embedding_map)
+
+
+def test_retrieve_relevant_context_keeps_only_top_k_similar_chunks():
+    material_text = "결제 모듈 관련 내용입니다.\n\n날씨가 좋은 하루였습니다."
+    query_text = "결제 모듈 오류를 논의합니다"
+    embedding_map = {
+        "결제 모듈 관련 내용입니다.": [1.0, 0.0],
+        "날씨가 좋은 하루였습니다.": [0.0, 1.0],
+        query_text: [1.0, 0.0],
+    }
+
+    material, past = retrieve_relevant_context(
+        query_text, material_text=material_text, top_k=1, client=_FakeClient(embedding_map),
+    )
+
+    assert material == "결제 모듈 관련 내용입니다."
+    assert past is None
+
+
+def test_retrieve_relevant_context_returns_input_unchanged_when_nothing_to_chunk():
+    material, past = retrieve_relevant_context("query", material_text=None, past_meeting_texts=None)
+
+    assert material is None
+    assert past is None
