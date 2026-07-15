@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type PointerEvent, type WheelEvent } from 'react';
 import './App.css';
+import { supabase } from './supabaseClient';
+import type { Session } from '@supabase/supabase-js';
 
 type Project = {
   id: string;              // gsvx 하위 네임스페이스 키 (X-Project-Id 헤더로 전달, ASCII 슬러그)
@@ -64,39 +66,22 @@ type AuthUser = {
   role: string;
 };
 
-type AuthSession = {
-  token: string;
-  expiresAt?: string;
-};
-
-type AuthResponse = {
-  user: AuthUser;
-  session: AuthSession;
-};
-
 const PROJECTS_STORAGE_KEY = 'synapvox-projects';
 const WORKSPACES_STORAGE_KEY = 'synapvox-project-workspaces';
-const AUTH_STORAGE_KEY = 'synapvox-auth';
-
-const loadStoredAuth = (): { user: AuthUser; session: AuthSession } | null => {
-  try {
-    const raw = window.localStorage.getItem(AUTH_STORAGE_KEY);
-    if (raw === null) return null;
-    const parsed = JSON.parse(raw) as { user?: AuthUser; session?: AuthSession };
-    if (
-      typeof parsed.user?.id !== 'string'
-      || typeof parsed.user?.email !== 'string'
-      || typeof parsed.user?.name !== 'string'
-      || typeof parsed.session?.token !== 'string'
-    ) return null;
-    return { user: parsed.user, session: parsed.session };
-  } catch {
-    return null;
-  }
-};
-
-const initialStoredAuth = loadStoredAuth();
 const scopedStorageKey = (baseKey: string, userId: string | null) => `${baseKey}:${userId ?? 'guest'}`;
+
+const authUserFromSession = (session: Session | null): AuthUser | null => {
+  if (session === null) return null;
+  const metadataName = session.user.user_metadata.name;
+  return {
+    id: session.user.id,
+    email: session.user.email ?? '로그인된 계정',
+    name: typeof metadataName === 'string' && metadataName.trim() !== ''
+      ? metadataName
+      : session.user.email?.split('@')[0] ?? '사용자',
+    role: 'user',
+  };
+};
 
 // 프로젝트 목록을 localStorage에 영속화 — 새로고침해도 프로젝트 id↔그래프(gsvx 네임스페이스) 매핑이 유지된다.
 const loadStoredProjects = (userId: string | null): Project[] => {
@@ -292,15 +277,19 @@ const mapIntermediateTranscript = (data: IntermediateTranscript): TranscriptSegm
 };
 
 function App() {
-  const [projects, setProjects] = useState<Project[]>(() => loadStoredProjects(initialStoredAuth?.user.id ?? null));
+  const [projects, setProjects] = useState<Project[]>(() => loadStoredProjects(null));
   const [sourceItems, setSourceItems] = useState(initialSourceItems);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [activeProjectIndex, setActiveProjectIndex] = useState<number | null>(null);
   const [isProfileOpen, setIsProfileOpen] = useState(false);
   const [isAdminOpen, setIsAdminOpen] = useState(false);
-  const [currentUser, setCurrentUser] = useState<AuthUser | null>(() => initialStoredAuth?.user ?? null);
-  const [authSession, setAuthSession] = useState<AuthSession | null>(() => initialStoredAuth?.session ?? null);
-  const [isLoggedIn, setIsLoggedIn] = useState(() => initialStoredAuth !== null);
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authName, setAuthName] = useState('');
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [authLoading, setAuthLoading] = useState(false);
   const [projectQuery, setProjectQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('전체');
   const [projectSort, setProjectSort] = useState('최근 수정순');
@@ -308,11 +297,6 @@ function App() {
   const [homeSection, setHomeSection] = useState('노트북');
   const [adminSection, setAdminSection] = useState('개요');
   const [authMode, setAuthMode] = useState<'login' | 'signup' | null>(null);
-  const [authIdentifier, setAuthIdentifier] = useState('');
-  const [authName, setAuthName] = useState('');
-  const [authPassword, setAuthPassword] = useState('');
-  const [authError, setAuthError] = useState<string | null>(null);
-  const [isAuthSubmitting, setIsAuthSubmitting] = useState(false);
   const [isProjectModalOpen, setIsProjectModalOpen] = useState(false);
   const [projectDraft, setProjectDraft] = useState({
     name: '',
@@ -632,7 +616,7 @@ function App() {
   const transcriptsRef = useRef(transcriptsBySourceId);
   transcriptsRef.current = transcriptsBySourceId;
   const projectWorkspacesRef = useRef<Record<string, ProjectWorkspace>>(
-    loadStoredWorkspaces(initialStoredAuth?.user.id ?? null),
+    loadStoredWorkspaces(null),
   );
   const prevProjectIdRef = useRef<string | null>(null);
 
@@ -664,6 +648,29 @@ function App() {
     setSelectedGraphNodeId(null);
     setGraphFocusNodeIds([]);
   };
+
+  useEffect(() => {
+    const syncSession = (session: Session | null) => {
+      const user = authUserFromSession(session);
+      setIsLoggedIn(user !== null);
+      setCurrentUser(user);
+      setIsAdminOpen(false);
+      switchProjectStorage(user?.id ?? null);
+    };
+
+    supabase.auth.getSession().then(({ data }) => {
+      syncSession(data.session);
+    }).catch((error) => {
+      console.error('Supabase 세션 확인 실패:', error);
+      syncSession(null);
+    });
+
+    const { data: subscription } = supabase.auth.onAuthStateChange((_event, session) => {
+      syncSession(session);
+    });
+
+    return () => subscription.subscription.unsubscribe();
+  }, []);
 
   useEffect(() => {
     if (!shouldSeedDemoRecordingRef.current) return;
@@ -832,97 +839,79 @@ function App() {
     window.history.pushState({ view: 'profile' }, '', window.location.pathname);
   };
 
-  const resetAuthForm = () => {
-    setAuthName('');
-    setAuthIdentifier('');
-    setAuthPassword('');
-    setAuthError(null);
-    setIsAuthSubmitting(false);
-  };
-
   const logout = () => {
-    const token = authSession?.token;
-    if (token !== undefined) {
-      void fetch('/api/auth/logout', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token }),
-      }).catch((error) => {
-        console.error('로그아웃 API 호출 실패:', error);
-      });
-    }
+    void supabase.auth.signOut();
     setIsLoggedIn(false);
     setCurrentUser(null);
-    setAuthSession(null);
-    window.localStorage.removeItem(AUTH_STORAGE_KEY);
     switchProjectStorage(null);
     setIsProfileOpen(false);
     setIsAdminOpen(false);
     setIsHelpOpen(false);
     setIsAccountMenuOpen(false);
     setAuthMode(null);
-    resetAuthForm();
   };
 
-  const completeAuth = async () => {
-    if (authMode === null) return;
-    const isAdminLogin = authMode === 'login' && authIdentifier.trim() === '0101';
-    if (isAdminLogin) {
-      const adminUser = {
-        id: 'local-admin',
-        email: 'admin@synapvox.local',
-        name: '관리자',
-        role: 'admin',
-      };
-      setIsLoggedIn(true);
-      setCurrentUser(adminUser);
-      setAuthSession(null);
-      window.localStorage.removeItem(AUTH_STORAGE_KEY);
-      switchProjectStorage(adminUser.id);
-      setIsAdminOpen(true);
-      setIsProfileOpen(false);
-      setIsHelpOpen(false);
-      setActiveProjectIndex(null);
-      setIsAccountMenuOpen(false);
-      setAuthMode(null);
-      resetAuthForm();
-      window.history.pushState({ view: 'admin' }, '', window.location.pathname);
+  const closeAuthModal = () => {
+    setAuthMode(null);
+    setAuthEmail('');
+    setAuthPassword('');
+    setAuthName('');
+    setAuthError(null);
+  };
+
+  const completeAuth = () => {
+    setIsLoggedIn(true);
+    setIsAccountMenuOpen(false);
+    closeAuthModal();
+  };
+
+  const completeAdminAuth = () => {
+    const adminUser = {
+      id: 'local-admin',
+      email: 'admin@synapvox.local',
+      name: '관리자',
+      role: 'admin',
+    };
+    setIsLoggedIn(true);
+    setCurrentUser(adminUser);
+    switchProjectStorage(adminUser.id);
+    setIsAdminOpen(true);
+    setIsProfileOpen(false);
+    setIsHelpOpen(false);
+    setActiveProjectIndex(null);
+    setIsAccountMenuOpen(false);
+    closeAuthModal();
+    window.history.pushState({ view: 'admin' }, '', window.location.pathname);
+  };
+
+  const submitAuth = async () => {
+    if (authMode === 'login' && authEmail.trim() === '0101') {
+      completeAdminAuth();
       return;
     }
 
     setAuthError(null);
-    setIsAuthSubmitting(true);
+    setAuthLoading(true);
     try {
-      const endpoint = authMode === 'login' ? '/api/auth/login' : '/api/auth/signup';
-      const response = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(authMode === 'login'
-          ? { identifier: authIdentifier, password: authPassword }
-          : { name: authName, email: authIdentifier, password: authPassword }),
-      });
-      if (!response.ok) {
-        const errorBody = await response.json().catch(() => null) as { detail?: string } | null;
-        throw new Error(errorBody?.detail ?? '인증 요청에 실패했습니다.');
+      if (authMode === 'signup') {
+        const { error } = await supabase.auth.signUp({
+          email: authEmail,
+          password: authPassword,
+          options: { data: { name: authName } },
+        });
+        if (error) throw error;
+      } else {
+        const { error } = await supabase.auth.signInWithPassword({
+          email: authEmail,
+          password: authPassword,
+        });
+        if (error) throw error;
       }
-
-      const authResult = await response.json() as AuthResponse;
-      setIsLoggedIn(true);
-      setCurrentUser(authResult.user);
-      setAuthSession(authResult.session);
-      window.localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(authResult));
-      switchProjectStorage(authResult.user.id);
-      setIsAdminOpen(false);
-      setIsProfileOpen(false);
-      setIsHelpOpen(false);
-      setActiveProjectIndex(null);
-      setIsAccountMenuOpen(false);
-      setAuthMode(null);
-      resetAuthForm();
+      completeAuth();
     } catch (error) {
-      setAuthError(error instanceof Error ? error.message : '인증 중 문제가 발생했습니다.');
+      setAuthError(error instanceof Error ? error.message : '인증에 실패했습니다.');
     } finally {
-      setIsAuthSubmitting(false);
+      setAuthLoading(false);
     }
   };
 
@@ -2664,7 +2653,7 @@ function App() {
       </main>
 
       {authMode !== null && (
-        <div className="auth-modal-backdrop" role="presentation" onMouseDown={() => setAuthMode(null)}>
+        <div className="auth-modal-backdrop" role="presentation" onMouseDown={closeAuthModal}>
           <section
             className="auth-modal"
             role="dialog"
@@ -2672,7 +2661,7 @@ function App() {
             aria-labelledby="auth-modal-title"
             onMouseDown={(event) => event.stopPropagation()}
           >
-            <button className="auth-close" type="button" aria-label="닫기" onClick={() => setAuthMode(null)}>
+            <button className="auth-close" type="button" aria-label="닫기" onClick={closeAuthModal}>
               ×
             </button>
 
@@ -2688,29 +2677,30 @@ function App() {
 
             <form className="auth-form" onSubmit={(event) => {
               event.preventDefault();
-              void completeAuth();
+              void submitAuth();
             }}>
               {authMode === 'signup' && (
                 <label>
                   이름
                   <input
                     type="text"
-                    value={authName}
-                    onChange={(event) => setAuthName(event.target.value)}
                     placeholder="도원"
                     autoComplete="name"
+                    value={authName}
+                    onChange={(event) => setAuthName(event.target.value)}
                   />
                 </label>
               )}
 
               <label>
-                {authMode === 'login' ? '아이디' : '이메일'}
+                {authMode === 'login' ? '이메일 또는 관리자 코드' : '이메일'}
                 <input
                   type={authMode === 'login' ? 'text' : 'email'}
-                  value={authIdentifier}
-                  onChange={(event) => setAuthIdentifier(event.target.value)}
-                  placeholder={authMode === 'login' ? '이메일 또는 관리자 코드' : 'you@synapvox.com'}
+                  placeholder="you@synapvox.com"
                   autoComplete={authMode === 'login' ? 'username' : 'email'}
+                  required
+                  value={authEmail}
+                  onChange={(event) => setAuthEmail(event.target.value)}
                 />
               </label>
 
@@ -2722,20 +2712,25 @@ function App() {
                   onChange={(event) => setAuthPassword(event.target.value)}
                   placeholder="비밀번호"
                   autoComplete={authMode === 'login' ? 'current-password' : 'new-password'}
+                  required
+                  minLength={6}
                 />
               </label>
 
-              {authError !== null && <p className="record-error">{authError}</p>}
+              {authError && <p className="auth-error">{authError}</p>}
 
-              <button className="auth-submit" type="submit" disabled={isAuthSubmitting}>
-                {isAuthSubmitting ? '처리 중...' : authMode === 'login' ? '로그인' : '회원가입'}
+              <button className="auth-submit" type="submit" disabled={authLoading}>
+                {authLoading ? '처리 중…' : authMode === 'login' ? '로그인' : '회원가입'}
               </button>
 
               <button
                 className="auth-switch"
                 type="button"
                 onClick={() => {
-                  resetAuthForm();
+                  setAuthEmail('');
+                  setAuthPassword('');
+                  setAuthName('');
+                  setAuthError(null);
                   setAuthMode(authMode === 'login' ? 'signup' : 'login');
                 }}
               >

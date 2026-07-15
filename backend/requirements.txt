@@ -10,3 +10,4 @@ pdfplumber
 pymupdf
 python-pptx
 psycopg2-binary>=2.9
+pyjwt[crypto]
