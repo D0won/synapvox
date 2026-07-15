@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type PointerEvent, type WheelEvent } from 'react';
 import './App.css';
-import { supabase } from './supabaseClient';
+import { requireSupabase, supabase } from './supabaseClient';
 import type { Session } from '@supabase/supabase-js';
 
 type Project = {
@@ -650,6 +650,11 @@ function App() {
   };
 
   useEffect(() => {
+    if (supabase === null) {
+      switchProjectStorage(null);
+      return undefined;
+    }
+
     const syncSession = (session: Session | null) => {
       const user = authUserFromSession(session);
       setIsLoggedIn(user !== null);
@@ -840,7 +845,7 @@ function App() {
   };
 
   const logout = () => {
-    void supabase.auth.signOut();
+    void supabase?.auth.signOut();
     setIsLoggedIn(false);
     setCurrentUser(null);
     switchProjectStorage(null);
@@ -893,15 +898,16 @@ function App() {
     setAuthError(null);
     setAuthLoading(true);
     try {
+      const supabaseClient = requireSupabase();
       if (authMode === 'signup') {
-        const { error } = await supabase.auth.signUp({
+        const { error } = await supabaseClient.auth.signUp({
           email: authEmail,
           password: authPassword,
           options: { data: { name: authName } },
         });
         if (error) throw error;
       } else {
-        const { error } = await supabase.auth.signInWithPassword({
+        const { error } = await supabaseClient.auth.signInWithPassword({
           email: authEmail,
           password: authPassword,
         });

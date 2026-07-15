@@ -3,12 +3,22 @@ import { createClient } from '@supabase/supabase-js';
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
-if (typeof supabaseUrl !== 'string' || supabaseUrl.length === 0) {
-  throw new Error('VITE_SUPABASE_URL is required.');
-}
+const hasSupabaseConfig = (
+  typeof supabaseUrl === 'string'
+  && supabaseUrl.length > 0
+  && !supabaseUrl.includes('{project-ref}')
+  && typeof supabaseAnonKey === 'string'
+  && supabaseAnonKey.length > 0
+  && !supabaseAnonKey.startsWith('replace-with-')
+);
 
-if (typeof supabaseAnonKey !== 'string' || supabaseAnonKey.length === 0) {
-  throw new Error('VITE_SUPABASE_ANON_KEY is required.');
-}
+export const supabase = hasSupabaseConfig
+  ? createClient(supabaseUrl, supabaseAnonKey)
+  : null;
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+export const requireSupabase = () => {
+  if (supabase === null) {
+    throw new Error('프론트 Supabase 환경변수(VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY)가 필요합니다.');
+  }
+  return supabase;
+};
