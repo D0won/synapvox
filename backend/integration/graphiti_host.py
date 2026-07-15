@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import os
 import logging
-import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
@@ -18,7 +17,6 @@ from graph_service.zep_graphiti import ZepGraphiti, get_fact_result_from_edge
 from graphiti_core.driver.neo4j_driver import Neo4jDriver
 from graphiti_core.errors import GroupsEdgesNotFoundError, NodeNotFoundError
 from graphiti_core.nodes import EpisodeType
-from graphiti_core.utils.bulk_utils import RawEpisode
 from pydantic import BaseModel, Field
 
 
@@ -110,35 +108,27 @@ async def add_messages(request: AddMessagesRequest) -> dict:
     concepts_new = 0
     relations_new = 0
     episodes: list[str] = []
-    batch_size = max(1, int(os.getenv("GRAPHITI_BULK_BATCH_SIZE") or "8"))
-    raw_episodes = [
-        RawEpisode(
-            uuid=None,
+    for message in request.messages:
+        result = await _client().add_episode(
+            uuid=message.uuid,
             name=message.name,
-            content=message.content,
+            episode_body=message.content,
+            source_description=message.source_description,
             reference_time=message.timestamp,
             source=EpisodeType.text,
-            source_description=message.source_description,
-        )
-        for message in request.messages
-    ]
-    for start in range(0, len(raw_episodes), batch_size):
-        batch_started = time.perf_counter()
-        batch = raw_episodes[start:start + batch_size]
-        result = await _client().add_episode_bulk(
-            batch,
             group_id=request.group_id,
             entity_types=ENTITY_TYPES,
             custom_extraction_instructions=EXTRACTION_INSTRUCTIONS,
         )
         logger.info(
-            "graphiti.ingest completed group=%s model=%s episodes=%d elapsed=%.2fs",
+            "graphiti.ingest completed group=%s model=%s episode=%s nodes=%d edges=%d",
             request.group_id,
             _client().llm_client.model,
-            len(batch),
-            time.perf_counter() - batch_started,
+            result.episode.uuid,
+            len(result.nodes),
+            len(result.edges),
         )
-        episodes.extend(episode.uuid for episode in result.episodes)
+        episodes.append(result.episode.uuid)
         concepts_new += len(result.nodes)
         relations_new += len(result.edges)
     return {
