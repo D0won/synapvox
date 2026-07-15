@@ -284,6 +284,7 @@ function App() {
     },
   ]);
   const [graphReloadKey, setGraphReloadKey] = useState(0);
+  const [chatGraphExpansion, setChatGraphExpansion] = useState<Set<string> | null>(null);
   const [isDetailAudioPlaying, setIsDetailAudioPlaying] = useState(false);
   const [detailAudioTimeLabel, setDetailAudioTimeLabel] = useState('00:00');
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -1416,8 +1417,10 @@ function App() {
           expansion?: { nodes?: { id: string }[] };
         };
         assistantText = data.answer;
+        setChatGraphExpansion(new Set((data.expansion?.nodes ?? []).map((node) => node.id)));
       } catch (error) {
         console.error('AI 답변을 받아오지 못했습니다:', error);
+        setChatGraphExpansion(null);
         const hasRecordings = sourceItems.some((source) => source.category === '녹음본');
         const hasMaterials = sourceItems.some((source) => source.category === '자료');
         assistantText = hasRecordings || hasMaterials
@@ -2395,7 +2398,12 @@ function App() {
               </aside>
 
               <section className="studio-graph">
-                <GraphModule project={activeProjectId} projectName={activeProject.name} reloadKey={graphReloadKey} />
+                <GraphModule
+                  project={activeProjectId}
+                  projectName={activeProject.name}
+                  reloadKey={graphReloadKey}
+                  askExpansionIds={chatGraphExpansion}
+                />
               </section>
 
               <aside className="studio-chat">

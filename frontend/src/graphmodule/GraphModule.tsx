@@ -16,15 +16,24 @@ import { DetailDrawer } from './detail/DetailDrawer'
 import { useDetail } from './detail/useDetail'
 import './graphmodule.css'
 
-export default function GraphModule({ project, projectName, reloadKey = 0 }: { project: string | null; projectName: string; reloadKey?: number }) {
+export default function GraphModule({
+  project,
+  projectName,
+  reloadKey = 0,
+  askExpansionIds = null,
+}: {
+  project: string | null
+  projectName: string
+  reloadKey?: number
+  askExpansionIds?: Set<string> | null
+}) {
   const [meta, setMeta] = useState({ nodes: 0, edges: 0, settled: false })
-  const [askExpansion, setAskExpansion] = useState<Set<string> | null>(null)
+  const [detailAskExpansion, setDetailAskExpansion] = useState<Set<string> | null>(null)
   const [panel, setPanel] = useState<'detail' | 'answer' | null>(null)
-  const [draft, setDraft] = useState('')
 
   const base = project ?? ''
   const detail = useDetail(base)
-  const ask = useAsk(base, setAskExpansion)
+  const ask = useAsk(base, setDetailAskExpansion)
 
   const onMeta = useCallback(
     (m: { nodes: number; edges: number; settled: boolean }) => setMeta(m),
@@ -37,13 +46,6 @@ export default function GraphModule({ project, projectName, reloadKey = 0 }: { p
     },
     [detail],
   )
-  const submitAsk = useCallback(() => {
-    const q = draft.trim()
-    if (!q) return
-    ask.ask(q)
-    setPanel('answer')
-    setDraft('')
-  }, [draft, ask])
   const closeDrawer = useCallback(() => {
     setPanel(null)
     detail.close()
@@ -84,20 +86,8 @@ export default function GraphModule({ project, projectName, reloadKey = 0 }: { p
             reloadKey={reloadKey}
             onGraphMeta={onMeta}
             onSelectNode={onSelectNode}
-            askExpansionIds={askExpansion}
+            askExpansionIds={askExpansionIds ?? detailAskExpansion}
           />
-          <form className="svx-gm__ask" onSubmit={(e) => { e.preventDefault(); submitAsk() }}>
-            <input
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              placeholder="프로젝트 자료와 녹음본에 대해 질문하세요"
-              disabled={ask.busy}
-              aria-label="그래프에 질문"
-            />
-            <button type="submit" disabled={ask.busy || draft.trim().length === 0}>
-              {ask.busy ? '…' : '질문'}
-            </button>
-          </form>
         </div>
         {drawer ? <aside className="svx-gm__drawer">{drawer}</aside> : null}
       </div>
