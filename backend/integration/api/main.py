@@ -200,8 +200,16 @@ def _transcribe_with_clova(audio_path: str, source: str, project_id: str, meetin
     if material_text and os.getenv("OPENAI_API_KEY"):
       try:
           refiner = _load_stt_module("refine_transcript")
-          data = refiner.refine_transcript(data, material_text=material_text)
-          data["refinement"] = {"enabled": True}
+          refine_material_text = material_text
+          retrieval_used = False
+          if os.getenv("SUPABASE_DB_URL"):
+              query_text = " ".join(s["text"] for s in data["segments"])
+              refine_material_text, _ = refiner.retrieve_relevant_context(
+                  query_text, project_id, meeting_id, material_text=material_text,
+              )
+              retrieval_used = True
+          data = refiner.refine_transcript(data, material_text=refine_material_text)
+          data["refinement"] = {"enabled": True, "retrieval": retrieval_used}
       except Exception as exc:
           data["refinement"] = {"enabled": False, "error": str(exc)}
     else:
