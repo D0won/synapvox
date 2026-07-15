@@ -1343,18 +1343,28 @@ function App() {
 
     // 원본은 Supabase Storage에 보존하고, 분석 가능한 문서는 Neo4j에도 반영한다.
     fileList.forEach((file, index) => {
-      if (projectId !== null) {
-        void persistMaterialFile(file, nextMaterials[index], projectId, 'project').then((persistedSource) => {
-          projectMaterialFilesRef.current[projectId] = (projectMaterialFilesRef.current[projectId] ?? [])
-            .map((entry) => entry.source.id === persistedSource.id ? { ...entry, source: persistedSource } : entry);
-        }).catch((error) => {
+      void (async () => {
+        try {
+          if (projectId !== null) {
+            const persistedSource = await persistMaterialFile(
+              file,
+              nextMaterials[index],
+              projectId,
+              'project',
+            );
+            projectMaterialFilesRef.current[projectId] = (projectMaterialFilesRef.current[projectId] ?? [])
+              .map((entry) => entry.source.id === persistedSource.id ? { ...entry, source: persistedSource } : entry);
+          }
+          if (isGraphIngestibleDocument(file)) {
+            await uploadMaterialToGraph(file, nextMaterials[index].id, projectId);
+          }
+        } catch (error) {
           console.error('프로젝트 자료 저장 실패:', error);
           setSourceItems((items) => items.map((source) => source.id === nextMaterials[index].id
             ? { ...source, meta: `${source.meta} · 저장 실패` }
             : source));
-        });
-      }
-      if (isGraphIngestibleDocument(file)) void uploadMaterialToGraph(file, nextMaterials[index].id, activeProjectId);
+        }
+      })();
     });
 
     return nextMaterials.length;
@@ -1555,6 +1565,19 @@ function App() {
 
       const result = await response.json() as IntermediateTranscript;
       const transcriptSegments = mapIntermediateTranscript(result);
+      let persistedRecordingMaterials = recordingAttachedMaterials;
+      if (supabase !== null && currentUser !== null) {
+        persistedRecordingMaterials = await Promise.all(recordingMaterialFiles.map((file, index) => (
+          persistMaterialFile(
+            file,
+            recordingAttachedMaterials[index],
+            activeProjectId,
+            'recording',
+            recordingId,
+            meetingId,
+          )
+        )));
+      }
 
       // 전사문과 이 녹음에만 붙인 참고 자료를 같은 meeting_id로 Neo4j에 묶는다.
       try {
@@ -1572,7 +1595,7 @@ function App() {
         }
         await Promise.all(recordingMaterialFiles.map((file, index) => (
           isGraphIngestibleDocument(file)
-            ? uploadMaterialToGraph(file, recordingAttachedMaterials[index]?.id ?? '', activeProjectId, meetingId)
+            ? uploadMaterialToGraph(file, persistedRecordingMaterials[index]?.id ?? '', activeProjectId, meetingId)
             : Promise.resolve(false)
         )));
         setGraphReloadKey((value) => value + 1);
@@ -1585,19 +1608,6 @@ function App() {
         minute: '2-digit',
         hour12: false,
       });
-      let persistedRecordingMaterials = recordingAttachedMaterials;
-      if (supabase !== null && currentUser !== null) {
-        persistedRecordingMaterials = await Promise.all(recordingMaterialFiles.map((file, index) => (
-          persistMaterialFile(
-            file,
-            recordingAttachedMaterials[index],
-            activeProjectId,
-            'recording',
-            recordingId,
-            meetingId,
-          )
-        )));
-      }
       const linkedMaterials = [
         ...projectMaterialsForTranscription.map((entry) => entry.source),
         ...persistedRecordingMaterials,
