@@ -23,10 +23,16 @@ type SourceItem = {
   category: string;
   meta: string;
   updatedOrder: number;
+  materialScope?: 'project' | 'recording';
   audioUrl?: string;
   durationLabel?: string;
   attachedMaterials?: SourceItem[];
   mediaKind?: 'audio' | 'video';
+};
+
+type ProjectMaterialFile = {
+  source: SourceItem;
+  file: File;
 };
 
 type IntermediateSegment = {
@@ -427,11 +433,18 @@ function App() {
   const sourceFileInputRef = useRef<HTMLInputElement | null>(null);
   const recordingFileInputRef = useRef<HTMLInputElement | null>(null);
   const recordingMediaFileInputRef = useRef<HTMLInputElement | null>(null);
+  const projectMaterialFilesRef = useRef<Record<string, ProjectMaterialFile[]>>({});
   const shouldSeedDemoRecordingRef = useRef(window.location.search.includes('demoRecording'));
 
   const activeProject = activeProjectIndex === null ? null : projects[activeProjectIndex];
   const activeProjectId = activeProject?.id ?? null;
   const storageUserId = currentUser?.id ?? null;
+  const projectMaterialFiles = activeProjectId === null
+    ? []
+    : projectMaterialFilesRef.current[activeProjectId] ?? [];
+  const projectMaterialCount = projectMaterialFiles.length;
+  const recordingMaterialCount = recordingMaterialFiles.length;
+  const totalTranscriptionMaterialCount = projectMaterialCount + recordingMaterialCount;
 
   // gsvx 호출 공통 헤더 — 프로젝트가 열려 있으면 X-Project-Id로 하위 네임스페이스를 지정한다.
   const gsvxHeaders = (projectId: string | null): Record<string, string> => ({
@@ -708,6 +721,7 @@ function App() {
   const switchProjectStorage = (userId: string | null) => {
     setProjects(userId === null ? [] : loadStoredProjects(userId));
     projectWorkspacesRef.current = userId === null ? {} : loadStoredWorkspaces(userId);
+    projectMaterialFilesRef.current = {};
     prevProjectIdRef.current = null;
     setSourceItems([]);
     setTranscriptsBySourceId({});
@@ -1181,6 +1195,10 @@ function App() {
       URL.revokeObjectURL(targetSource.audioUrl);
     }
     setSourceItems((currentSourceItems) => currentSourceItems.filter((source) => source.id !== sourceId));
+    if (activeProjectId !== null) {
+      projectMaterialFilesRef.current[activeProjectId] = (projectMaterialFilesRef.current[activeProjectId] ?? [])
+        .filter((entry) => entry.source.id !== sourceId);
+    }
     if (targetSource !== undefined && activeProjectIndex !== null) {
       setProjects((currentProjects) => currentProjects.map((project, projectIndex) => {
         if (projectIndex !== activeProjectIndex) return project;
@@ -1217,7 +1235,11 @@ function App() {
     setIsRecordingMenuOpen(false);
   };
 
-  const createMaterialItems = (files: FileList | File[], prefix = 'material') => {
+  const createMaterialItems = (
+    files: FileList | File[],
+    prefix = 'material',
+    materialScope: SourceItem['materialScope'] = 'project',
+  ) => {
     const fileList = Array.from(files).filter((file) => file.size > 0 || file.name.trim().length > 0);
     if (fileList.length === 0) return [];
 
@@ -1227,6 +1249,7 @@ function App() {
       title: file.name,
       type: getMaterialSourceType(file),
       category: '자료',
+      materialScope,
       meta: `자료 · ${formatFileSize(file.size)}`,
       updatedOrder: index,
     }));
@@ -1264,8 +1287,16 @@ function App() {
 
   const addProjectMaterialFiles = (files: FileList | File[]) => {
     const fileList = Array.from(files).filter((file) => file.size > 0 || file.name.trim().length > 0);
-    const nextMaterials = createMaterialItems(fileList, 'material');
+    const nextMaterials = createMaterialItems(fileList, 'material', 'project');
     if (nextMaterials.length === 0) return 0;
+    const projectId = activeProjectId;
+
+    if (projectId !== null) {
+      projectMaterialFilesRef.current[projectId] = [
+        ...nextMaterials.map((source, index) => ({ source, file: fileList[index] })),
+        ...(projectMaterialFilesRef.current[projectId] ?? []),
+      ];
+    }
 
     setSourceItems((currentSourceItems) => [
       ...nextMaterials,
@@ -1290,7 +1321,7 @@ function App() {
 
   const addRecordingMaterialFiles = (files: FileList | File[]) => {
     const fileList = Array.from(files).filter((file) => file.size > 0 || file.name.trim().length > 0);
-    const nextMaterials = createMaterialItems(fileList, 'recording-material');
+    const nextMaterials = createMaterialItems(fileList, 'recording-material', 'recording');
     if (nextMaterials.length === 0) return 0;
 
     setSourceItems((currentSourceItems) => [
@@ -1449,6 +1480,12 @@ function App() {
 
     const body = new FormData();
     body.append('audio', recordedAudioBlob, recordedAudioFileName ?? `synapvox-recording-${Date.now()}.webm`);
+    const projectMaterialsForTranscription = activeProjectId === null
+      ? []
+      : projectMaterialFilesRef.current[activeProjectId] ?? [];
+    projectMaterialsForTranscription.forEach(({ file }) => {
+      body.append('materials', file, file.name);
+    });
     recordingMaterialFiles.forEach((file) => {
       body.append('materials', file, file.name);
     });
@@ -1495,16 +1532,22 @@ function App() {
         hour12: false,
       });
       const recordingId = `recording-${now.getTime()}`;
+      const linkedMaterials = [
+        ...projectMaterialsForTranscription.map((entry) => entry.source),
+        ...recordingAttachedMaterials,
+      ].filter((material, index, materials) => (
+        materials.findIndex((candidate) => candidate.id === material.id) === index
+      ));
       const savedRecording: SourceItem = {
         id: recordingId,
         title: getRecordingTitle(recordedAudioFileName, `녹음본 ${timeLabel}`),
         type: recordedAudioFileName === null ? '녹음' : '파일',
         category: '녹음본',
-        meta: `전사 완료 · 오늘 ${timeLabel}${recordingAttachedMaterials.length > 0 ? ` · 연결 자료 ${recordingAttachedMaterials.length}개` : ''}`,
+        meta: `전사 완료 · 오늘 ${timeLabel}${linkedMaterials.length > 0 ? ` · 연결 자료 ${linkedMaterials.length}개` : ''}`,
         updatedOrder: 0,
         audioUrl: recordedAudioUrl ?? undefined,
         durationLabel: recordedAudioDurationLabel,
-        attachedMaterials: recordingAttachedMaterials,
+        attachedMaterials: linkedMaterials,
         mediaKind: recordedMediaKind,
       };
       if (recordedAudioUrl !== null) savedAudioUrlsRef.current.add(recordedAudioUrl);
@@ -2494,7 +2537,10 @@ function App() {
 
               <div className="source-panel-content">
                 <div className="source-actions">
-                  <button className="source-primary-button" type="button" onClick={() => setSourceModalMode('source')}>+ 자료 추가</button>
+                  <div className="project-material-action">
+                    <button className="source-primary-button" type="button" onClick={() => setSourceModalMode('source')}>+ 프로젝트 자료</button>
+                    <p>이 프로젝트의 모든 녹음 전사와 AI 답변에 참고돼요.</p>
+                  </div>
                   <button className="record-primary-button" type="button" onClick={() => setSourceModalMode('record')}>녹음 하기</button>
                 </div>
 
@@ -2971,12 +3017,12 @@ function App() {
 
             <p className="eyebrow">{sourceModalMode === 'source' ? 'Add source' : 'Record audio'}</p>
             <h2 id="source-modal-title">
-              {sourceModalMode === 'source' ? '자료 추가' : '녹음 시작'}
+              {sourceModalMode === 'source' ? '프로젝트 자료 추가' : '녹음 시작'}
             </h2>
             <p>
               {sourceModalMode === 'source'
-                ? '파일을 추가하면 자료 소스 카드에 표시됩니다.'
-                : '녹음에 참고할 파일을 함께 넣고 전사, 요약, 그래프 연결을 진행합니다.'}
+                ? '이 프로젝트의 모든 녹음 전사와 AI 답변에 참고할 자료를 추가합니다.'
+                : '프로젝트 자료와 이번 녹음 참고자료를 함께 사용해 전사를 진행합니다.'}
             </p>
 
             {sourceModalMode === 'source' ? (
@@ -3000,8 +3046,8 @@ function App() {
                   }}
                 >
                   <span aria-hidden="true">+</span>
-                  <strong>파일을 여기에 드래그하세요</strong>
-                  <p>추가하면 자료 소스 카드에 바로 들어갑니다.</p>
+                  <strong>프로젝트 자료를 여기에 드래그하세요</strong>
+                  <p>추가한 자료는 이 프로젝트의 녹음 전사와 AI 답변에 자동 참고됩니다.</p>
                 </div>
                 <input
                   ref={sourceFileInputRef}
@@ -3097,8 +3143,8 @@ function App() {
                 >
                   <span aria-hidden="true">+</span>
                   <div>
-                    <strong>녹음 참고 파일 추가</strong>
-                    <p>자료 카드에 표시되고, 전사 후 녹음본 상세에서도 보입니다.</p>
+                    <strong>이번 녹음 참고자료 추가</strong>
+                    <p>이 녹음본 전사에만 추가로 참고됩니다.</p>
                   </div>
                 </div>
                 <input
@@ -3111,11 +3157,27 @@ function App() {
                     event.target.value = '';
                   }}
                 />
-                {recordingAttachedMaterials.length > 0 && (
+                {totalTranscriptionMaterialCount > 0 && (
+                  <div className="record-reference-summary" aria-label="전사 참고자료">
+                    <strong>전사 참고자료</strong>
+                    <p>
+                      프로젝트 자료 {projectMaterialCount}개
+                      {' '}
+                      + 이번 녹음 자료 {recordingMaterialCount}개
+                    </p>
+                  </div>
+                )}
+                {(projectMaterialFiles.length > 0 || recordingAttachedMaterials.length > 0) && (
                   <div className="record-attached-list" aria-label="이 녹음본에 연결된 자료">
+                    {projectMaterialFiles.map(({ source }) => (
+                      <span key={source.id}>
+                        <b>공통</b>
+                        {source.title}
+                      </span>
+                    ))}
                     {recordingAttachedMaterials.map((material) => (
                       <span key={material.id}>
-                        <b>{material.type}</b>
+                        <b>이번</b>
                         {material.title}
                       </span>
                     ))}
