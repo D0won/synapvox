@@ -75,8 +75,11 @@ def concept_detail(driver, project_id: str, concept_id: str, database: str | Non
         record = s.run(
             f"MATCH (t:{S.TOPIC} {{project_id:$pid, topic_id:$tid}}) "
             f"OPTIONAL MATCH (m:{S.MEETING} {{project_id:$pid}})-[:{S.DISCUSSES}]->(t) "
+            "WITH t, collect(DISTINCT {session_id:m.meeting_id, "
+            "title:coalesce(m.title,m.meeting_id)}) AS sessions "
+            f"OPTIONAL MATCH (t)-[:{S.RELATES_TO}]-(r:{S.TOPIC} {{project_id:$pid}}) "
             "RETURN t.topic_id AS concept_id, t.name AS label, t.summary AS summary, "
-            "collect(DISTINCT {session_id:m.meeting_id, title:coalesce(m.title,m.meeting_id)}) AS sessions",
+            "sessions, collect(DISTINCT {concept_id:r.topic_id, label:r.name}) AS related_concepts",
             pid=project_id, tid=concept_id,
         ).single()
     return record.data() if record else None
@@ -97,18 +100,20 @@ def session_detail(driver, project_id: str, meeting_id: str, database: str | Non
 
 
 def expansion_for_chunks(driver, project_id: str, chunk_ids: list[str],
-                         database: str | None = None) -> dict:
+                         database: str | None = None,
+                         concept_labels: list[str] | None = None) -> dict:
     """HybridSearch 근거 청크의 세션/개념 서브그래프를 프론트 강조 형식으로 반환한다."""
-    if not chunk_ids:
+    if not chunk_ids or concept_labels == []:
         return {"nodes": [], "edges": []}
     with driver.session(database=database) as s:
         rows = s.run(
             f"MATCH (m:{S.MEETING} {{project_id:$pid}})-[:{S.HAS_CHUNK}]->"
             f"(c:{S.CHUNK} {{project_id:$pid}})-[:{S.DISCUSSES}]->(t:{S.TOPIC} {{project_id:$pid}}) "
             "WHERE c.chunk_id IN $chunk_ids "
+            "AND ($concept_labels IS NULL OR t.name IN $concept_labels) "
             "RETURN DISTINCT m.meeting_id AS session_id, coalesce(m.title,m.meeting_id) AS session_title, "
             "t.topic_id AS concept_id, t.name AS concept_label",
-            pid=project_id, chunk_ids=chunk_ids,
+            pid=project_id, chunk_ids=chunk_ids, concept_labels=concept_labels,
         ).data()
     nodes: dict[str, dict] = {}
     edges: list[dict] = []

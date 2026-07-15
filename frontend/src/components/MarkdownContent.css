@@ -1,0 +1,120 @@
+.markdown-content {
+  min-width: 0;
+  color: inherit;
+  font-size: 0.9rem;
+  line-height: 1.62;
+  overflow-wrap: anywhere;
+}
+
+.markdown-content > :first-child {
+  margin-top: 0;
+}
+
+.markdown-content > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown-content p,
+.markdown-content ul,
+.markdown-content ol,
+.markdown-content blockquote,
+.markdown-content pre,
+.markdown-content table {
+  margin: 0 0 0.72em;
+}
+
+.markdown-content h1,
+.markdown-content h2,
+.markdown-content h3,
+.markdown-content h4 {
+  margin: 1em 0 0.45em;
+  color: inherit;
+  font-family: inherit;
+  font-weight: 750;
+  line-height: 1.35;
+}
+
+.markdown-content h1 {
+  font-size: 1.18em;
+}
+
+.markdown-content h2 {
+  font-size: 1.1em;
+}
+
+.markdown-content h3,
+.markdown-content h4 {
+  font-size: 1em;
+}
+
+.markdown-content ul,
+.markdown-content ol {
+  padding-left: 1.35em;
+}
+
+.markdown-content li + li {
+  margin-top: 0.28em;
+}
+
+.markdown-content strong {
+  font-weight: 800;
+}
+
+.markdown-content blockquote {
+  padding-left: 0.85em;
+  border-left: 3px solid var(--line);
+  color: var(--muted);
+}
+
+.markdown-content a {
+  color: #53634b;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+.markdown-content code {
+  padding: 0.12em 0.3em;
+  border-radius: 4px;
+  background: rgba(103, 92, 73, 0.1);
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 0.86em;
+}
+
+.markdown-content pre {
+  max-width: 100%;
+  padding: 0.8em;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #f7f1e6;
+}
+
+.markdown-content pre code {
+  padding: 0;
+  background: transparent;
+}
+
+.markdown-content table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+
+.markdown-content th,
+.markdown-content td {
+  padding: 0.42em 0.55em;
+  border: 1px solid var(--line);
+  text-align: left;
+}
+
+.markdown-content .katex-display {
+  margin: 0.8em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  text-align: left;
+}
+
+.markdown-content .katex {
+  font-size: 1.02em;
+}

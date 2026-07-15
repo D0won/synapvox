@@ -1,4 +1,5 @@
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import os
 from pathlib import Path
@@ -8,6 +9,8 @@ from openai import OpenAI
 from backend.graphrag import VectorStore
 
 _MAX_RETRIES = 2
+_DEFAULT_TRANSCRIPT_CHUNK_CHARS = 800
+_DEFAULT_PARALLEL_REQUESTS = 3
 
 
 def _chunk_text(text: str, chunk_size: int = 300) -> list:
@@ -27,6 +30,26 @@ def _chunk_text(text: str, chunk_size: int = 300) -> list:
             for i in range(0, len(paragraph), chunk_size):
                 chunks.append(paragraph[i:i + chunk_size])
     return chunks
+
+
+def chunk_transcript_segments(segments: list[dict], max_chars: int = _DEFAULT_TRANSCRIPT_CHUNK_CHARS) -> list[list[dict]]:
+    """Group complete STT segments into stable, roughly max_chars-sized refinement batches."""
+    if max_chars < 1:
+        raise ValueError("max_chars must be positive")
+    batches: list[list[dict]] = []
+    current: list[dict] = []
+    current_chars = 0
+    for segment in segments:
+        text_chars = len(str(segment.get("text", "")))
+        if current and current_chars + text_chars > max_chars:
+            batches.append(current)
+            current = []
+            current_chars = 0
+        current.append(segment)
+        current_chars += text_chars
+    if current:
+        batches.append(current)
+    return batches
 
 
 def retrieve_relevant_context(
@@ -108,20 +131,16 @@ def _parse_llm_output(raw_content: str, expected_ids: set) -> dict:
     return {s["id"]: s["text"] for s in data["segments"]}
 
 
-def refine_transcript(
-    data: dict,
-    material_text: str = None,
-    past_meeting_texts: list = None,
-    model: str = "gpt-4o",
+def _request_chunk_corrections(
+    client,
+    segments: list[dict],
+    material_text: str | None,
+    past_meeting_texts: list | None,
+    model: str,
 ) -> dict:
-    """Apply stage-2 refinement to a 중간 포맷 JSON object (source/mode/segments shape).
-    Returns the same shape with segments[].text replaced by the corrected version."""
-    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-    prompt = build_refinement_prompt(data["segments"], material_text, past_meeting_texts)
-    expected_ids = {s["id"] for s in data["segments"]}
-
+    prompt = build_refinement_prompt(segments, material_text, past_meeting_texts)
+    expected_ids = {segment["id"] for segment in segments}
     messages = [{"role": "user", "content": prompt}]
-    corrections = None
     last_error = None
 
     for _ in range(_MAX_RETRIES + 1):
@@ -132,15 +151,49 @@ def refine_transcript(
         )
         content = response.choices[0].message.content
         try:
-            corrections = _parse_llm_output(content, expected_ids)
-            break
-        except (json.JSONDecodeError, ValueError) as e:
-            last_error = str(e)
+            return _parse_llm_output(content, expected_ids)
+        except (json.JSONDecodeError, ValueError) as exc:
+            last_error = str(exc)
             messages.append({"role": "assistant", "content": content})
             messages.append({"role": "user", "content": f"오류: {last_error}. 형식을 정확히 지켜 다시 출력하세요."})
 
-    if corrections is None:
-        raise RuntimeError(f"LLM refinement failed after {_MAX_RETRIES + 1} attempts: {last_error}")
+    raise RuntimeError(f"LLM refinement failed after {_MAX_RETRIES + 1} attempts: {last_error}")
+
+
+def refine_transcript(
+    data: dict,
+    material_text: str = None,
+    past_meeting_texts: list = None,
+    model: str = "gpt-4o",
+    max_chars: int = _DEFAULT_TRANSCRIPT_CHUNK_CHARS,
+    max_parallel: int = _DEFAULT_PARALLEL_REQUESTS,
+    client=None,
+) -> dict:
+    """Apply stage-2 refinement to a 중간 포맷 JSON object (source/mode/segments shape).
+    Returns the same shape with segments[].text replaced by the corrected version."""
+    if max_parallel < 1:
+        raise ValueError("max_parallel must be positive")
+    batches = chunk_transcript_segments(data["segments"], max_chars=max_chars)
+    if not batches:
+        return {**data, "segments": []}
+
+    openai_client = client or OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    corrections: dict = {}
+    worker_count = min(max_parallel, len(batches))
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = [
+            executor.submit(
+                _request_chunk_corrections,
+                openai_client,
+                batch,
+                material_text,
+                past_meeting_texts,
+                model,
+            )
+            for batch in batches
+        ]
+        for future in as_completed(futures):
+            corrections.update(future.result())
 
     refined_segments = [{**seg, "text": corrections[seg["id"]]} for seg in data["segments"]]
     return {**data, "segments": refined_segments}

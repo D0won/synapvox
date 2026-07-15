@@ -2407,6 +2407,82 @@ h3 {
   padding: 0 12px;
 }
 
+.empty-trash-button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.project-delete-dialog {
+  box-sizing: border-box;
+  width: min(440px, calc(100vw - 32px));
+  border: 1px solid var(--line);
+  border-top: 4px solid #9a5a4f;
+  border-radius: 8px;
+  background: var(--page);
+  box-shadow: 0 24px 70px rgba(51, 43, 32, 0.22);
+  color: var(--ink);
+  padding: 26px;
+}
+
+.project-delete-dialog.bulk {
+  border-top-color: #743d35;
+  background: #fffaf5;
+}
+
+.project-delete-dialog h2 {
+  margin-top: 8px;
+  font-size: 1.45rem;
+}
+
+.project-delete-dialog > p:not(.eyebrow) {
+  margin-top: 14px;
+  color: var(--muted);
+  line-height: 1.65;
+}
+
+.project-delete-dialog > strong {
+  display: block;
+  margin-top: 12px;
+  color: #8a493e;
+  font-size: 0.88rem;
+}
+
+.project-delete-dialog-error {
+  display: block;
+  margin-top: 12px;
+  color: #8a493e;
+  font-size: 0.82rem;
+  font-weight: 750;
+  line-height: 1.45;
+}
+
+.project-delete-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 24px;
+}
+
+.project-delete-dialog-actions button {
+  min-width: 92px;
+  height: 40px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 253, 247, 0.92);
+  color: var(--ink);
+  font-weight: 800;
+}
+
+.project-delete-dialog-actions button.danger {
+  border-color: #8a493e;
+  background: #8a493e;
+  color: #fffaf3;
+}
+
+.project-delete-dialog-actions button:disabled {
+  opacity: 0.58;
+}
+
 .home-grid {
   width: min(1180px, 100%);
   align-self: center;
@@ -4874,7 +4950,11 @@ h3 {
   align-self: flex-start;
 }
 
-.chat-bubble span {
+.chat-bubble.pending {
+  min-width: 170px;
+}
+
+.chat-bubble > span {
   display: block;
   margin-bottom: 5px;
   color: var(--muted);
@@ -4882,13 +4962,48 @@ h3 {
   font-weight: 900;
 }
 
-.chat-bubble.user span {
+.chat-bubble.user > span {
   color: #d8cbb8;
 }
 
 .chat-bubble p {
   line-height: 1.55;
   font-size: 0.9rem;
+}
+
+.chat-pending-status {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 22px;
+  color: var(--muted);
+}
+
+.chat-pending-status i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--moss);
+  animation: chat-pending-pulse 1.1s ease-in-out infinite;
+}
+
+.chat-pending-status i:nth-child(2) {
+  animation-delay: 0.14s;
+}
+
+.chat-pending-status i:nth-child(3) {
+  animation-delay: 0.28s;
+}
+
+.chat-pending-status b {
+  margin-left: 4px;
+  font-size: 0.8rem;
+  font-weight: 650;
+}
+
+@keyframes chat-pending-pulse {
+  0%, 70%, 100% { opacity: 0.3; transform: translateY(0); }
+  35% { opacity: 1; transform: translateY(-2px); }
 }
 
 .studio-chat-composer {
@@ -4921,6 +5036,11 @@ h3 {
   color: #fffaf3;
   font-size: 1.2rem;
   font-weight: 900;
+}
+
+.studio-chat-composer button:disabled {
+  cursor: wait;
+  opacity: 0.48;
 }
 
 .graph-view {

@@ -2,6 +2,7 @@
 // 위에, 답변 텍스트를 아래에 둔다. hits는 경계 타입이 unknown[]이라(백엔드 키 변동
 // 대비) 방어적으로 읽는다. Archive 미학: paper 위 Fraunces 제목 + 세션 라벨은 mono.
 import type { AskResult } from '../api/types'
+import { MarkdownContent } from '../../components/MarkdownContent'
 import './ask.css'
 
 type HitLike = { session_id?: unknown; title?: unknown; text?: unknown; fact?: unknown }
@@ -70,9 +71,9 @@ export function AnswerDrawer(props: {
           {/* 근거 아래에 답변 본문. */}
           <section className="answer-drawer__section">
             <h3 className="answer-drawer__label">답변</h3>
-            <p className="answer-drawer__answer">
+            <MarkdownContent className="answer-drawer__answer">
               {answer?.answer?.trim() || '관련한 근거를 찾지 못했어요. 다른 방식으로 질문해 보시겠어요?'}
-            </p>
+            </MarkdownContent>
           </section>
         </div>
       )}

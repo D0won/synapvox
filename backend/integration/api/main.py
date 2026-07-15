@@ -1,21 +1,25 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 import tempfile
 import types
 import importlib.util
 import json
+import logging
 import re
 import zipfile
 from datetime import date
 from pathlib import Path
+from time import perf_counter
 from typing import Optional
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from dotenv import load_dotenv
 
 from .auth import require_user
@@ -24,6 +28,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 load_dotenv(REPO_ROOT / ".env")
+logger = logging.getLogger(__name__)
 
 
 def _load_stt_module(module_name: str):
@@ -304,6 +309,7 @@ async def transcribe_recording(
 _neo4j_driver = None
 _graph_store_instance = None
 _vector_store_instance = None
+_openai_chat_client = None
 
 
 def _graph_runtime():
@@ -341,6 +347,14 @@ def _optional_vector_store():
         return None
 
 
+def _chat_client():
+    global _openai_chat_client
+    if _openai_chat_client is None:
+        from openai import OpenAI
+        _openai_chat_client = OpenAI(timeout=30.0, max_retries=1)
+    return _openai_chat_client
+
+
 def _owned_source_record(user_id: str, source_id: str) -> dict | None:
     """Read deletion metadata only when the authenticated user owns the source."""
     import psycopg2
@@ -362,26 +376,102 @@ def _owned_source_record(user_id: str, source_id: str) -> dict | None:
     ))
 
 
-def _answer_from_hits(question: str, hits: list[dict]) -> str:
+def _owned_project_record(user_id: str, project_id: str) -> dict | None:
+    """Return a project only when it belongs to the authenticated user."""
+    import psycopg2
+
+    with psycopg2.connect(os.environ["SUPABASE_DB_URL"]) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT id, name, trashed_at
+                   FROM public.projects
+                   WHERE id = %s AND owner_id = %s""",
+                (project_id, user_id),
+            )
+            row = cursor.fetchone()
+    if row is None:
+        return None
+    return dict(zip(("id", "name", "trashed_at"), row))
+
+
+def _owned_trashed_project_ids(user_id: str, project_ids: list[str]) -> list[str]:
+    """Return only requested projects that are owned by the user and in trash."""
+    if not project_ids:
+        return []
+    import psycopg2
+
+    with psycopg2.connect(os.environ["SUPABASE_DB_URL"]) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT id FROM public.projects
+                   WHERE owner_id = %s AND trashed_at IS NOT NULL AND id = ANY(%s)""",
+                (user_id, project_ids),
+            )
+            return [str(row[0]) for row in cursor.fetchall()]
+
+
+def _owned_transcript_exists(user_id: str, project_id: str, meeting_id: str) -> bool:
+    """Only persisted, user-owned transcripts may be ingested into the graph."""
+    import psycopg2
+
+    with psycopg2.connect(os.environ["SUPABASE_DB_URL"]) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT 1 FROM public.recording_transcripts
+                   WHERE owner_id = %s AND project_id = %s AND meeting_id = %s
+                   LIMIT 1""",
+                (user_id, project_id, meeting_id),
+            )
+            return cursor.fetchone() is not None
+
+
+ANSWER_INSTRUCTIONS = (
+    "제공된 강의 자료와 전사문만 근거로 한국어로 간결하게 답하세요. "
+    "근거가 부족하면 부족하다고 말하세요. 답변은 Markdown으로 구조화하고, "
+    "수학 수식은 인라인 수식은 $...$, 블록 수식은 $$...$$ 형태의 LaTeX로 작성하세요."
+)
+
+
+def _fallback_answer(hits: list[dict]) -> str:
     if not hits:
         return "아직 이 프로젝트에서 질문과 관련된 자료나 전사문을 찾지 못했습니다."
+    return f"관련 자료에서 다음 내용을 확인했습니다.\n\n{hits[0].get('text', '')[:700]}"
+
+
+def _answer_request(question: str, hits: list[dict]) -> dict:
     context = "\n\n".join(
         f"[{hit.get('meeting_title') or hit.get('meeting_id') or '근거'}]\n{hit.get('text', '')}"
         for hit in hits
     )[:12000]
+    return {
+        "model": os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini"),
+        "instructions": ANSWER_INSTRUCTIONS,
+        "input": f"질문: {question}\n\n근거:\n{context}",
+        "max_output_tokens": int(os.getenv("OPENAI_CHAT_MAX_TOKENS", "900")),
+        "store": False,
+    }
+
+
+def _stream_answer_text(question: str, hits: list[dict]):
+    if not hits or not os.getenv("OPENAI_API_KEY"):
+        yield _fallback_answer(hits)
+        return
+    emitted = False
     if os.getenv("OPENAI_API_KEY"):
         try:
-            from openai import OpenAI
-            response = OpenAI().responses.create(
-                model=os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini"),
-                instructions="제공된 강의 자료와 전사문만 근거로 한국어로 간결하게 답하세요. 근거가 부족하면 부족하다고 말하세요.",
-                input=f"질문: {question}\n\n근거:\n{context}",
-            )
-            if response.output_text:
-                return response.output_text.strip()
+            with _chat_client().responses.stream(**_answer_request(question, hits)) as stream:
+                for event in stream:
+                    if event.type == "response.output_text.delta" and event.delta:
+                        emitted = True
+                        yield event.delta
         except Exception:
-            pass
-    return f"관련 자료에서 다음 내용을 확인했습니다.\n\n{hits[0].get('text', '')[:700]}"
+            logger.exception("OpenAI answer stream failed")
+    if not emitted:
+        yield _fallback_answer(hits)
+
+
+def _answer_from_hits(question: str, hits: list[dict]) -> str:
+    return "".join(_stream_answer_text(question, hits)).strip()
 
 
 @app.post("/ingest-stt", include_in_schema=False)
@@ -399,6 +489,15 @@ async def ingest_stt_to_graph(
     project_id = x_project_id or transcript.get("project_id")
     if not project_id:
         raise HTTPException(status_code=400, detail="X-Project-Id or transcript.project_id is required")
+    meeting_id = str(transcript.get("meeting_id") or "")
+    user_id = str(user.get("sub") or "")
+    transcript_saved = await run_in_threadpool(
+        _owned_transcript_exists, user_id, project_id, meeting_id)
+    if not transcript_saved:
+        raise HTTPException(
+            status_code=409,
+            detail="transcript must be saved before graph ingest",
+        )
     try:
         from backend.integration.pipeline import ingest_intermediate
         driver, graph_store, database = _graph_runtime()
@@ -506,8 +605,10 @@ async def delete_source_graph(
             meeting_id = source.get("recording_id") or source_id
             if meeting_id.startswith("recording-"):
                 meeting_id = meeting_id.replace("recording-", "meeting-", 1)
-        graph_deleted = await run_in_threadpool(graph_store.delete_meeting, project_id, meeting_id)
-        vector_deleted = await run_in_threadpool(vector_store.delete_meeting, project_id, meeting_id)
+        graph_deleted, vector_deleted = await asyncio.gather(
+            run_in_threadpool(graph_store.delete_meeting, project_id, meeting_id),
+            run_in_threadpool(vector_store.delete_meeting, project_id, meeting_id),
+        )
         return {
             "source_id": source_id,
             "project_id": project_id,
@@ -518,17 +619,21 @@ async def delete_source_graph(
 
     from backend.integration.pipeline import document_chunk_prefix
     chunk_prefix = document_chunk_prefix(project_id, source_id)
-    graph_deleted = await run_in_threadpool(
-        graph_store.delete_chunks_by_prefix, project_id, chunk_prefix)
+    graph_deleted, vector_deleted = await asyncio.gather(
+        run_in_threadpool(graph_store.delete_chunks_by_prefix, project_id, chunk_prefix),
+        run_in_threadpool(vector_store.delete_chunks_by_prefix, project_id, chunk_prefix),
+    )
     if graph_deleted == 0:
         title = Path(source["original_name"]).stem or source["original_name"]
         legacy_prefix = document_chunk_prefix(project_id, title)
         if legacy_prefix != chunk_prefix:
             chunk_prefix = legacy_prefix
-            graph_deleted = await run_in_threadpool(
-                graph_store.delete_chunks_by_prefix, project_id, chunk_prefix)
-    vector_deleted = await run_in_threadpool(
-        vector_store.delete_chunks_by_prefix, project_id, chunk_prefix)
+            legacy_graph_deleted, legacy_vector_deleted = await asyncio.gather(
+                run_in_threadpool(graph_store.delete_chunks_by_prefix, project_id, chunk_prefix),
+                run_in_threadpool(vector_store.delete_chunks_by_prefix, project_id, chunk_prefix),
+            )
+            graph_deleted += legacy_graph_deleted
+            vector_deleted += legacy_vector_deleted
     return {
         "source_id": source_id,
         "project_id": project_id,
@@ -536,6 +641,63 @@ async def delete_source_graph(
         "graph_chunks_deleted": graph_deleted,
         "vector_chunks_deleted": vector_deleted,
     }
+
+
+@app.delete("/api/project-data")
+async def delete_project_data(
+    project_id: str = Query(..., min_length=1),
+    user: dict = Depends(require_user),
+) -> dict:
+    """Permanently delete one owned project's Neo4j and pgvector namespace."""
+    user_id = str(user.get("sub") or "")
+    project = await run_in_threadpool(_owned_project_record, user_id, project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    if project["trashed_at"] is None:
+        raise HTTPException(status_code=409, detail="project must be moved to trash first")
+
+    _, graph_store, _ = _graph_runtime()
+    try:
+        vector_store = _vector_store()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"vector database is not configured: {exc}") from exc
+
+    await asyncio.gather(
+        run_in_threadpool(graph_store.reset_many, [project_id]),
+        run_in_threadpool(vector_store.reset_many, [project_id]),
+    )
+    return {"project_id": project_id, "deleted": True}
+
+
+@app.post("/api/projects-data/delete")
+async def delete_projects_data(
+    payload: dict,
+    user: dict = Depends(require_user),
+) -> dict:
+    """Permanently delete several owned trashed project namespaces at once."""
+    raw_ids = payload.get("project_ids")
+    if not isinstance(raw_ids, list):
+        raise HTTPException(status_code=400, detail="project_ids must be a list")
+    project_ids = list(dict.fromkeys(str(value) for value in raw_ids if str(value)))
+    if not project_ids:
+        raise HTTPException(status_code=400, detail="project_ids is required")
+
+    user_id = str(user.get("sub") or "")
+    owned_ids = await run_in_threadpool(_owned_trashed_project_ids, user_id, project_ids)
+    if set(owned_ids) != set(project_ids):
+        raise HTTPException(status_code=409, detail="all projects must be owned and in trash")
+
+    _, graph_store, _ = _graph_runtime()
+    try:
+        vector_store = _vector_store()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"vector database is not configured: {exc}") from exc
+
+    await asyncio.gather(
+        run_in_threadpool(graph_store.reset_many, project_ids),
+        run_in_threadpool(vector_store.reset_many, project_ids),
+    )
+    return {"project_ids": project_ids, "deleted": len(project_ids)}
 
 
 @app.get("/api/graph")
@@ -555,16 +717,101 @@ async def ask_project_graph(
     k: int = Query(6, ge=1, le=12),
     user: dict = Depends(require_user),
 ) -> dict:
-    from backend.graphrag import HybridSearch, expansion_for_chunks
+    from backend.graphrag import HybridSearch, expansion_from_hits
+    from backend.graphrag.search import select_focus_topics
     driver, _, database = _graph_runtime()
     vector_store = _optional_vector_store()
     if vector_store is None:
         raise HTTPException(status_code=503, detail="vector search is not configured")
+    started = perf_counter()
     hits = await run_in_threadpool(HybridSearch(driver, vector_store, database).search, project, q, k)
-    expansion = await run_in_threadpool(
-        expansion_for_chunks, driver, project, [hit["chunk_id"] for hit in hits], database)
-    return {"answer": await run_in_threadpool(_answer_from_hits, q, hits),
-            "hits": hits, "expansion": expansion}
+    searched = perf_counter()
+    answer = await run_in_threadpool(_answer_from_hits, q, hits)
+    answered = perf_counter()
+    focus_topics = select_focus_topics(f"{q}\n{answer}", hits)
+    expansion = expansion_from_hits(hits, focus_topics)
+    finished = perf_counter()
+    timings = {
+        "search": round((searched - started) * 1000),
+        "answer": round((answered - searched) * 1000),
+        "focus": round((finished - answered) * 1000),
+        "total": round((finished - started) * 1000),
+    }
+    logger.info("ask timings project=%s query=%r timings_ms=%s", project, q[:80], timings)
+    return {"answer": answer,
+            "hits": hits, "expansion": expansion, "focus_topics": focus_topics,
+            "timings_ms": timings}
+
+
+def _ndjson_event(event_type: str, **payload) -> str:
+    return json.dumps({"type": event_type, **payload}, ensure_ascii=False) + "\n"
+
+
+def _ask_stream_events(driver, vector_store, database, project: str, q: str, k: int):
+    from backend.graphrag import HybridSearch, expansion_from_hits
+    from backend.graphrag.search import select_focus_topics
+
+    started = perf_counter()
+    try:
+        hits = HybridSearch(driver, vector_store, database).search(project, q, k)
+        searched = perf_counter()
+        answer_parts: list[str] = []
+        pending_delta = ""
+        last_flush = perf_counter()
+        first_flush = True
+        for delta in _stream_answer_text(q, hits):
+            answer_parts.append(delta)
+            pending_delta += delta
+            now = perf_counter()
+            threshold = 16 if first_flush else 64
+            if len(pending_delta) >= threshold or now - last_flush >= 0.05:
+                yield _ndjson_event("delta", text=pending_delta)
+                pending_delta = ""
+                last_flush = now
+                first_flush = False
+        if pending_delta:
+            yield _ndjson_event("delta", text=pending_delta)
+        answered = perf_counter()
+        answer = "".join(answer_parts).strip()
+        focus_topics = select_focus_topics(f"{q}\n{answer}", hits)
+        expansion = expansion_from_hits(hits, focus_topics)
+        finished = perf_counter()
+        timings = {
+            "search": round((searched - started) * 1000),
+            "answer": round((answered - searched) * 1000),
+            "focus": round((finished - answered) * 1000),
+            "total": round((finished - started) * 1000),
+        }
+        logger.info("ask stream timings project=%s query=%r timings_ms=%s", project, q[:80], timings)
+        yield _ndjson_event(
+            "complete",
+            answer=answer,
+            hits=hits,
+            expansion=expansion,
+            focus_topics=focus_topics,
+            timings_ms=timings,
+        )
+    except Exception as exc:
+        logger.exception("ask stream failed project=%s query=%r", project, q[:80])
+        yield _ndjson_event("error", message=str(exc))
+
+
+@app.get("/api/ask-stream")
+def ask_project_graph_stream(
+    project: str = Query(..., min_length=1),
+    q: str = Query(..., min_length=1),
+    k: int = Query(6, ge=1, le=12),
+    user: dict = Depends(require_user),
+) -> StreamingResponse:
+    driver, _, database = _graph_runtime()
+    vector_store = _optional_vector_store()
+    if vector_store is None:
+        raise HTTPException(status_code=503, detail="vector search is not configured")
+    return StreamingResponse(
+        _ask_stream_events(driver, vector_store, database, project, q, k),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/api/concept/{concept_id}")

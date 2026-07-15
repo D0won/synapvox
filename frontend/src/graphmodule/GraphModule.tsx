@@ -10,8 +10,6 @@ import '@fontsource/atkinson-hyperlegible'
 import '@fontsource-variable/jetbrains-mono'
 import GraphView from './graph/GraphView'
 import type { FNode } from './graph/buildForceData'
-import { AnswerDrawer } from './ask/AnswerDrawer'
-import { useAsk } from './ask/useAsk'
 import { DetailDrawer } from './detail/DetailDrawer'
 import { useDetail } from './detail/useDetail'
 import './graphmodule.css'
@@ -21,19 +19,19 @@ export default function GraphModule({
   projectName,
   reloadKey = 0,
   askExpansionIds = null,
+  onAskAboutConcept,
 }: {
   project: string | null
   projectName: string
   reloadKey?: number
   askExpansionIds?: Set<string> | null
+  onAskAboutConcept?: (label: string) => void
 }) {
   const [meta, setMeta] = useState({ nodes: 0, edges: 0, settled: false })
-  const [detailAskExpansion, setDetailAskExpansion] = useState<Set<string> | null>(null)
-  const [panel, setPanel] = useState<'detail' | 'answer' | null>(null)
+  const [panel, setPanel] = useState<'detail' | null>(null)
 
   const base = project ?? ''
   const detail = useDetail(base)
-  const ask = useAsk(base, setDetailAskExpansion)
 
   const onMeta = useCallback(
     (m: { nodes: number; edges: number; settled: boolean }) => setMeta(m),
@@ -49,20 +47,27 @@ export default function GraphModule({
   const closeDrawer = useCallback(() => {
     setPanel(null)
     detail.close()
-    ask.clear()
-  }, [detail, ask])
+  }, [detail])
   const drawer =
     panel === 'detail' && detail.state.status !== 'idle' ? (
       <DetailDrawer
         state={detail.state}
         onClose={closeDrawer}
+        onOpenConcept={(id, label) => {
+          detail.open({
+            id,
+            label,
+            type: 'concept',
+            bridge: false,
+            degree: 0,
+            neighbors: new Set(),
+          })
+        }}
         onAskAbout={(label) => {
-          ask.ask(`"${label}"이 무엇인지 이 강의들을 근거로 설명해줘`)
-          setPanel('answer')
+          closeDrawer()
+          onAskAboutConcept?.(label)
         }}
       />
-    ) : panel === 'answer' ? (
-      <AnswerDrawer answer={ask.answer} busy={ask.busy} error={ask.error} onClose={closeDrawer} />
     ) : null
 
   if (!base) {
@@ -86,7 +91,7 @@ export default function GraphModule({
             reloadKey={reloadKey}
             onGraphMeta={onMeta}
             onSelectNode={onSelectNode}
-            askExpansionIds={askExpansionIds ?? detailAskExpansion}
+            askExpansionIds={askExpansionIds}
           />
         </div>
         {drawer ? <aside className="svx-gm__drawer">{drawer}</aside> : null}

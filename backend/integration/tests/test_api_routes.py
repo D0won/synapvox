@@ -1,3 +1,5 @@
+import json
+
 from fastapi.testclient import TestClient
 
 from backend.integration.api import main as api_main
@@ -34,6 +36,7 @@ def test_api_ingest_stt_uses_active_project(monkeypatch):
     from backend.integration import pipeline
     monkeypatch.setattr(api_main, "_graph_runtime", lambda: (None, object(), None))
     monkeypatch.setattr(api_main, "_optional_vector_store", lambda: None)
+    monkeypatch.setattr(api_main, "_owned_transcript_exists", lambda user, project, meeting: True)
     monkeypatch.setattr(graphrag, "graph_data", lambda driver, project, database: {
         "nodes": [{"id": "t1", "type": "concept", "label": "그래프", "meta": {}}], "edges": [],
     })
@@ -63,6 +66,28 @@ def test_api_ingest_stt_uses_active_project(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["project"] == "project-uuid"
+
+
+def test_api_ingest_stt_rejects_unsaved_transcript(monkeypatch):
+    monkeypatch.setattr(api_main, "_owned_transcript_exists", lambda user, project, meeting: False)
+    transcript = {
+        "source": "lecture.wav",
+        "meeting_id": "lecture-cancelled",
+        "project_id": "project-uuid",
+        "date": "2026-07-15",
+        "mode": "lecture",
+        "segments": [
+            {"id": 0, "speaker": "A", "start": 0.0, "end": 1.0, "text": "취소된 전사"},
+        ],
+    }
+
+    response = TestClient(app).post(
+        "/api/ingest-stt",
+        headers={"X-Project-Id": "project-uuid"},
+        json=transcript,
+    )
+
+    assert response.status_code == 409
 
 
 def test_api_ingest_doc_stores_text_file(monkeypatch):
@@ -128,8 +153,8 @@ def test_api_graph_and_ask_use_current_project(monkeypatch):
     )
     monkeypatch.setattr(graphrag, "HybridSearch", _FakeSearch)
     monkeypatch.setattr(
-        graphrag, "expansion_for_chunks",
-        lambda driver, project, chunk_ids, database: {"nodes": [], "edges": []},
+        graphrag, "expansion_from_hits",
+        lambda hits, concept_labels: {"nodes": [], "edges": []},
     )
     client = TestClient(app)
 
@@ -140,6 +165,50 @@ def test_api_graph_and_ask_use_current_project(monkeypatch):
     assert graph.json()["nodes"][0]["id"] == "project-uuid"
     assert answer.status_code == 200
     assert answer.json()["answer"] == "질문"
+
+
+def test_api_ask_stream_emits_deltas_then_focus_graph(monkeypatch):
+    import backend.graphrag as graphrag
+
+    class _FakeSearch:
+        def __init__(self, driver, vector, database):
+            pass
+
+        def search(self, project, question, k):
+            return [{
+                "chunk_id": "c1",
+                "text": "미분 근거",
+                "score": 0.8,
+                "meeting_id": "m1",
+                "meeting_title": "최적화 개론",
+                "topics": ["미분"],
+                "topic_nodes": [{"id": "t1", "label": "미분"}],
+            }]
+
+    monkeypatch.setattr(api_main, "_graph_runtime", lambda: (object(), object(), "neo4j"))
+    monkeypatch.setattr(api_main, "_optional_vector_store", lambda: object())
+    monkeypatch.setattr(api_main, "_stream_answer_text", lambda question, hits: iter(["미분은 ", "변화율입니다."]))
+    monkeypatch.setattr(graphrag, "HybridSearch", _FakeSearch)
+    monkeypatch.setattr(
+        graphrag,
+        "expansion_from_hits",
+        lambda hits, labels: {
+            "nodes": [{"id": "t1", "type": "concept", "label": "미분", "meta": {}}],
+            "edges": [],
+        },
+    )
+
+    response = TestClient(app).get(
+        "/api/ask-stream",
+        params={"project": "project-uuid", "q": "미분이 뭐야", "k": 4},
+    )
+    events = [json.loads(line) for line in response.text.splitlines() if line]
+
+    assert response.status_code == 200
+    assert "".join(event.get("text", "") for event in events) == "미분은 변화율입니다."
+    assert events[-1]["type"] == "complete"
+    assert events[-1]["answer"] == "미분은 변화율입니다."
+    assert events[-1]["expansion"]["nodes"][0]["id"] == "t1"
 
 
 def test_delete_recording_source_removes_graph_meeting_and_vectors(monkeypatch):
@@ -170,10 +239,10 @@ def test_delete_recording_source_removes_graph_meeting_and_vectors(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["graph_chunks_deleted"] == 3
-    assert calls == [
+    assert set(calls) == {
         ("graph", "project-uuid", "meeting-123"),
         ("vector", "project-uuid", "meeting-123"),
-    ]
+    }
 
 
 def test_delete_document_source_removes_only_its_chunk_prefix(monkeypatch):
@@ -205,7 +274,83 @@ def test_delete_document_source_removes_only_its_chunk_prefix(monkeypatch):
     assert response.status_code == 200
     prefix = response.json()["chunk_prefix"]
     assert prefix.startswith("doc-") and prefix.endswith("-d")
-    assert calls == [
+    assert set(calls) == {
         ("graph", "project-uuid", prefix),
         ("vector", "project-uuid", prefix),
-    ]
+    }
+
+
+def test_delete_project_data_resets_owned_trashed_project(monkeypatch):
+    calls = []
+
+    class _GraphStore:
+        def reset_many(self, projects):
+            calls.append(("graph", tuple(projects)))
+
+    class _VectorStore:
+        def reset_many(self, projects):
+            calls.append(("vector", tuple(projects)))
+
+    monkeypatch.setattr(api_main, "_owned_project_record", lambda user, project: {
+        "id": project,
+        "name": "삭제할 프로젝트",
+        "trashed_at": "2026-07-15T00:00:00+00:00",
+    })
+    monkeypatch.setattr(api_main, "_graph_runtime", lambda: (object(), _GraphStore(), "neo4j"))
+    monkeypatch.setattr(api_main, "_vector_store", lambda: _VectorStore())
+
+    response = TestClient(app).delete("/api/project-data", params={"project_id": "project-uuid"})
+
+    assert response.status_code == 200
+    assert response.json() == {"project_id": "project-uuid", "deleted": True}
+    assert set(calls) == {
+        ("graph", ("project-uuid",)),
+        ("vector", ("project-uuid",)),
+    }
+
+
+def test_bulk_delete_project_data_uses_one_batch_per_store(monkeypatch):
+    calls = []
+
+    class _GraphStore:
+        def reset_many(self, projects):
+            calls.append(("graph", tuple(projects)))
+
+    class _VectorStore:
+        def reset_many(self, projects):
+            calls.append(("vector", tuple(projects)))
+
+    monkeypatch.setattr(
+        api_main,
+        "_owned_trashed_project_ids",
+        lambda user, projects: list(projects),
+    )
+    monkeypatch.setattr(api_main, "_graph_runtime", lambda: (object(), _GraphStore(), "neo4j"))
+    monkeypatch.setattr(api_main, "_vector_store", lambda: _VectorStore())
+
+    response = TestClient(app).post(
+        "/api/projects-data/delete",
+        json={"project_ids": ["project-a", "project-b"]},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "project_ids": ["project-a", "project-b"],
+        "deleted": 2,
+    }
+    assert set(calls) == {
+        ("graph", ("project-a", "project-b")),
+        ("vector", ("project-a", "project-b")),
+    }
+
+
+def test_delete_project_data_requires_trash_first(monkeypatch):
+    monkeypatch.setattr(api_main, "_owned_project_record", lambda user, project: {
+        "id": project,
+        "name": "활성 프로젝트",
+        "trashed_at": None,
+    })
+
+    response = TestClient(app).delete("/api/project-data", params={"project_id": "project-uuid"})
+
+    assert response.status_code == 409

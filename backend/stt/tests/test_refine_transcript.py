@@ -1,6 +1,7 @@
 import json
 import pathlib
 import sys
+from types import SimpleNamespace
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3]))  # repo root
 
@@ -10,6 +11,8 @@ from backend.stt.refine_transcript import (
     _chunk_text,
     _parse_llm_output,
     build_refinement_prompt,
+    chunk_transcript_segments,
+    refine_transcript,
     retrieve_relevant_context,
 )
 
@@ -85,6 +88,47 @@ def test_chunk_text_empty_returns_empty_list():
     assert _chunk_text(None) == []
     assert _chunk_text("") == []
     assert _chunk_text("   ") == []
+
+
+def test_chunk_transcript_segments_keeps_segments_whole_at_800_chars():
+    segments = [
+        {"id": index, "text": str(index) * 400}
+        for index in range(5)
+    ]
+
+    batches = chunk_transcript_segments(segments, max_chars=800)
+
+    assert [[segment["id"] for segment in batch] for batch in batches] == [[0, 1], [2, 3], [4]]
+
+
+def test_refine_transcript_sends_800_char_batches_and_restores_id_order():
+    calls = []
+
+    class _Completions:
+        def create(self, **kwargs):
+            prompt = kwargs["messages"][0]["content"]
+            transcript_block = prompt.split("# 전사문 세그먼트 (JSON)\n", 1)[1].split("\n\n# 출력 형식", 1)[0]
+            ids = [segment["id"] for segment in json.loads(transcript_block)]
+            calls.append(ids)
+            content = json.dumps({
+                "segments": [{"id": segment_id, "text": f"교정-{segment_id}"} for segment_id in ids],
+            }, ensure_ascii=False)
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
+
+    data = {
+        "segments": [
+            {"id": index, "speaker": "A", "start": float(index), "end": float(index + 1), "text": "가" * 400}
+            for index in range(5)
+        ],
+    }
+    client = SimpleNamespace(chat=SimpleNamespace(completions=_Completions()))
+
+    result = refine_transcript(data, max_chars=800, max_parallel=3, client=client)
+
+    assert sorted(calls) == [[0, 1], [2, 3], [4]]
+    assert [segment["text"] for segment in result["segments"]] == [
+        "교정-0", "교정-1", "교정-2", "교정-3", "교정-4",
+    ]
 
 
 class _FakeVectorStore:

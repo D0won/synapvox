@@ -105,6 +105,7 @@ type RawConceptDetail = {
   label: string
   summary: string | null
   sessions?: { session_id: string; title: string }[]
+  related_concepts?: { concept_id?: string | null; label?: string | null }[]
 }
 
 type RawSessionDetail = {
@@ -120,7 +121,19 @@ function normalizeConcept(raw: RawConceptDetail): ConceptDetail {
     concept_id: raw.concept_id,
     label: raw.label,
     summary: raw.summary ?? null,
-    sessions: (raw.sessions ?? []).map((s) => ({ sid: s.session_id, title: s.title })),
+    sessions: (raw.sessions ?? [])
+      .filter((s) => Boolean(s.session_id && s.title))
+      .map((s) => ({ sid: s.session_id, title: s.title })),
+    relatedConcepts: (raw.related_concepts ?? [])
+      .filter(
+        (concept): concept is { concept_id: string; label: string } =>
+          typeof concept.concept_id === 'string' &&
+          concept.concept_id !== raw.concept_id &&
+          typeof concept.label === 'string' &&
+          concept.label.length > 0,
+      )
+      .map((concept) => ({ id: concept.concept_id, label: concept.label }))
+      .sort((a, b) => a.label.localeCompare(b.label, 'ko')),
   }
 }
 

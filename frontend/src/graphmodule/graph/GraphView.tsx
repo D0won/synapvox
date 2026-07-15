@@ -33,6 +33,9 @@ const BRIDGE_FILL = '#E4E9DE'
 // Canvas ctx can't resolve `var(--font-ui)`; use the literal Atkinson stack.
 const LABEL_FONT = "'Atkinson Hyperlegible', system-ui, sans-serif"
 const COLD_START_MS = 6000 // Render free tier can cold-start ~50s; reassure after this
+const ASK_FOCUS_DURATION_MS = 650
+const ASK_FOCUS_PADDING = 84
+const SINGLE_NODE_FOCUS_ZOOM = 2.4
 
 // A link endpoint is a string id before the sim runs and a node object after
 // d3-force resolves it in place — normalize to the id either way.
@@ -165,8 +168,49 @@ export const GraphView = forwardRef<GraphViewHandle, GraphViewProps>(function Gr
   // re-render so drawNode/linkColor re-run. Highlights the answer's evidence
   // concepts on the graph ("질문하면 그래프가 근거로 반응") — dims the rest.
   useEffect(() => {
-    askIdsRef.current = props.askExpansionIds && props.askExpansionIds.size ? props.askExpansionIds : null
+    const focusIds = props.askExpansionIds && props.askExpansionIds.size ? props.askExpansionIds : null
+    askIdsRef.current = focusIds
     setAskTick((t) => t + 1)
+
+    // A fresh answer should take the camera to its evidence once. Keeping this
+    // tied to the expansion-set identity means later manual pan/zoom stays put.
+    if (!focusIds) return
+
+    let raf = 0
+    let tries = 0
+    const focus = () => {
+      const fg = fgRef.current
+      const graph = dataRef.current
+      if (!fg || !graph) {
+        if (tries++ < 30) raf = requestAnimationFrame(focus)
+        return
+      }
+
+      const focusedNodes = graph.nodes.filter(
+        (node) => focusIds.has(node.id) && Number.isFinite(node.x) && Number.isFinite(node.y),
+      )
+      if (focusedNodes.length === 0) return
+      const positionedFocusIds = new Set(focusedNodes.map((node) => node.id))
+
+      if (focusedNodes.length === 1) {
+        const node = focusedNodes[0]
+        fg.centerAt(node.x, node.y, ASK_FOCUS_DURATION_MS)
+        fg.zoom(SINGLE_NODE_FOCUS_ZOOM, ASK_FOCUS_DURATION_MS)
+        return
+      }
+
+      fg.zoomToFit(
+        ASK_FOCUS_DURATION_MS,
+        ASK_FOCUS_PADDING,
+        (node) => positionedFocusIds.has(String(node.id)),
+      )
+    }
+
+    // Let the highlight render before the camera starts moving toward it.
+    raf = requestAnimationFrame(() => {
+      raf = requestAnimationFrame(focus)
+    })
+    return () => cancelAnimationFrame(raf)
   }, [props.askExpansionIds])
 
   // ── Task 9: incremental growth ────────────────────────────────────────────
@@ -242,6 +286,14 @@ export const GraphView = forwardRef<GraphViewHandle, GraphViewProps>(function Gr
     setStatus('loading')
     setColdStart(false)
     setErrMsg('')
+    dataRef.current = null
+    setData(null)
+    setHover(null)
+    selectedIdRef.current = null
+    highlightNodesRef.current.clear()
+    highlightLinksRef.current.clear()
+    onGraphMeta?.({ nodes: 0, edges: 0, settled: true })
+    onSessions?.([])
     didFitRef.current = false
 
     const coldTimer = setTimeout(() => {
@@ -396,8 +448,13 @@ export const GraphView = forwardRef<GraphViewHandle, GraphViewProps>(function Gr
         ctx.globalAlpha = 1
         ctx.lineWidth = 1.8 / globalScale
         ctx.strokeStyle = '#66715B'
-        ctx.beginPath()
-        ctx.arc(x, y, r + 3.5 / globalScale, 0, 2 * Math.PI)
+        if (isSession) {
+          const focusSize = r * 1.72 + 7 / globalScale
+          roundedSquare(ctx, x, y, focusSize, 4.5 / globalScale)
+        } else {
+          ctx.beginPath()
+          ctx.arc(x, y, r + 3.5 / globalScale, 0, 2 * Math.PI)
+        }
         ctx.stroke()
       }
       ctx.restore()

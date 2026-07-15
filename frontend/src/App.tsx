@@ -2,16 +2,21 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import './App.css';
 import { supabase } from './supabaseClient';
 import GraphModule from './graphmodule/GraphModule';
+import { MarkdownContent } from './components/MarkdownContent';
 import type { Session } from '@supabase/supabase-js';
 import {
+  deleteStoredProjects,
   deleteProjectSource,
   downloadProjectSource,
+  loadStoredProjects as loadStoredProjectsFromDb,
   loadStoredProjectWorkspace,
+  saveStoredProject,
   saveRecordingTranscript,
   updateProjectSourcePayload,
   updateStoredTranscriptSegments,
   uploadProjectSource,
   type StoredSourceRow,
+  type StoredProjectRow,
 } from './sourceStorage';
 
 type Project = {
@@ -88,6 +93,15 @@ type AuthUser = {
   role: string;
 };
 
+type ProjectDeleteDialog =
+  | { kind: 'single'; projectId: string; projectName: string }
+  | { kind: 'empty'; count: number };
+
+type AskStreamEvent =
+  | { type: 'delta'; text: string }
+  | { type: 'complete'; answer: string; expansion?: { nodes?: { id: string }[] } }
+  | { type: 'error'; message: string };
+
 const PROJECTS_STORAGE_KEY = 'synapvox-projects';
 const WORKSPACES_STORAGE_KEY = 'synapvox-project-workspaces';
 const ACTIVE_PROJECT_STORAGE_KEY = 'synapvox-active-project';
@@ -153,6 +167,19 @@ const createDefaultProjectName = (projects: Project[]) => {
   }
   return `새 프로젝트 ${index}`;
 };
+
+const projectFromStoredRow = (row: StoredProjectRow): Project => ({
+  id: row.id,
+  name: row.name,
+  description: row.description,
+  updatedAt: new Date(row.updated_at).toLocaleDateString('ko-KR', { month: 'numeric', day: 'numeric' }),
+  recordings: row.recordings,
+  materials: row.materials,
+  status: row.status,
+  favorite: row.favorite,
+  shared: row.shared,
+  trashed: row.trashed_at !== null,
+});
 
 const statusFilters = ['전체', '분석 중', '요약 완료', '자료 필요'];
 const homeSections = ['노트북', '즐겨찾기', '공유됨', '휴지통'];
@@ -295,6 +322,9 @@ function App() {
   });
   const [isProjectTitleEditing, setIsProjectTitleEditing] = useState(false);
   const [isSourceEditing, setIsSourceEditing] = useState(false);
+  const [projectDeleteDialog, setProjectDeleteDialog] = useState<ProjectDeleteDialog | null>(null);
+  const [projectDeleteState, setProjectDeleteState] = useState<'idle' | 'deleting'>('idle');
+  const [projectDeleteError, setProjectDeleteError] = useState<string | null>(null);
   const [pendingSourceDeletion, setPendingSourceDeletion] = useState<SourceItem | null>(null);
   const [sourceDeletionState, setSourceDeletionState] = useState<'idle' | 'deleting'>('idle');
   const [sourceDeletionError, setSourceDeletionError] = useState<string | null>(null);
@@ -333,6 +363,8 @@ function App() {
   const [isSourceSortOpen, setIsSourceSortOpen] = useState(false);
   const [isSourcePanelOpen, setIsSourcePanelOpen] = useState(true);
   const [chatInput, setChatInput] = useState('');
+  const [isChatResponding, setIsChatResponding] = useState(false);
+  const [isChatWaiting, setIsChatWaiting] = useState(false);
   const [chatMessages, setChatMessages] = useState([
     {
       role: 'assistant',
@@ -347,9 +379,13 @@ function App() {
   const recordingStreamRef = useRef<MediaStream | null>(null);
   const recordingChunksRef = useRef<Blob[]>([]);
   const isClosingRecordingRef = useRef(false);
+  const transcriptionAbortControllerRef = useRef<AbortController | null>(null);
+  const transcriptionCancelledRef = useRef(false);
   const recordingStartedAtRef = useRef<number | null>(null);
   const savedAudioUrlsRef = useRef(new Set<string>());
   const detailAudioRef = useRef<HTMLAudioElement | HTMLVideoElement | null>(null);
+  const chatThreadRef = useRef<HTMLDivElement | null>(null);
+  const chatRequestInFlightRef = useRef(false);
   const sourceFileInputRef = useRef<HTMLInputElement | null>(null);
   const recordingFileInputRef = useRef<HTMLInputElement | null>(null);
   const recordingMediaFileInputRef = useRef<HTMLInputElement | null>(null);
@@ -375,6 +411,12 @@ function App() {
       ...(projectId !== null ? { 'X-Project-Id': projectId } : {}),
       ...(meetingId ? { 'X-Meeting-Id': meetingId } : {}),
     };
+  };
+  const persistProjectMetadata = (project: Project) => {
+    if (supabase === null || currentUser === null || currentUser.role === 'admin') return;
+    void saveStoredProject(supabase, currentUser.id, project).catch((error) => {
+      console.error('Supabase 프로젝트 저장 실패:', error);
+    });
   };
   const visibleSourceItems = sourceItems
     .filter((source) => source.category === sourceTab)
@@ -676,6 +718,23 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (supabase === null || currentUser === null || currentUser.role === 'admin') return;
+    const client = supabase;
+    const userId = currentUser.id;
+    const localProjects = loadStoredProjects(userId);
+    void loadStoredProjectsFromDb(client).then(async (storedProjects) => {
+      if (sessionUserIdRef.current !== userId) return;
+      if (storedProjects.length === 0 && localProjects.length > 0) {
+        await Promise.all(localProjects.map((project) => saveStoredProject(client, userId, project)));
+        return;
+      }
+      setProjects(storedProjects.map(projectFromStoredRow));
+    }).catch((error) => {
+      console.error('Supabase 프로젝트 목록 복원 실패:', error);
+    });
+  }, [currentUser]);
+
+  useEffect(() => {
     if (!shouldSeedDemoRecordingRef.current) return;
     shouldSeedDemoRecordingRef.current = false;
 
@@ -817,6 +876,11 @@ function App() {
 
   const closeSourceModal = () => {
     isClosingRecordingRef.current = true;
+    if (transcriptionState === 'transcribing') {
+      transcriptionCancelledRef.current = true;
+      transcriptionAbortControllerRef.current?.abort();
+      setGraphReloadKey((value) => value + 1);
+    }
     if (mediaRecorderRef.current?.state === 'recording') {
       mediaRecorderRef.current.stop();
     }
@@ -1015,6 +1079,7 @@ function App() {
     };
 
     setProjects((currentProjects) => [nextProject, ...currentProjects]);
+    persistProjectMetadata(nextProject);
     setIsProjectModalOpen(false);
     setIsProfileOpen(false);
     setIsAdminOpen(false);
@@ -1040,11 +1105,15 @@ function App() {
     if (activeProjectIndex === null) return;
     const name = projectEditDraft.name.trim() || activeProject?.name || '새 프로젝트';
     const description = projectEditDraft.description.trim() || '녹음본과 자료를 묶을 작업 공간';
+    const updatedProject = activeProject === null
+      ? null
+      : { ...activeProject, name, description, updatedAt: '방금' };
     setProjects((currentProjects) => currentProjects.map((project, projectIndex) => (
       projectIndex === activeProjectIndex
         ? { ...project, name, description, updatedAt: '방금' }
         : project
     )));
+    if (updatedProject !== null) persistProjectMetadata(updatedProject);
     setIsProjectTitleEditing(false);
   };
 
@@ -1115,7 +1184,9 @@ function App() {
       savedAudioUrlsRef.current.delete(targetSource.audioUrl);
       URL.revokeObjectURL(targetSource.audioUrl);
     }
+    const hasRemainingSources = sourceItems.some((source) => !removedSourceIds.has(source.id));
     setSourceItems((currentSourceItems) => currentSourceItems.filter((source) => !removedSourceIds.has(source.id)));
+    if (!hasRemainingSources) setIsSourceEditing(false);
     if (activeProjectId !== null) {
       projectMaterialFilesRef.current[activeProjectId] = (projectMaterialFilesRef.current[activeProjectId] ?? [])
         .filter((entry) => !removedSourceIds.has(entry.source.id));
@@ -1522,6 +1593,9 @@ function App() {
     setTranscriptionError(null);
     setTranscriptionState('transcribing');
     setTranscriptionStep(1);
+    transcriptionCancelledRef.current = false;
+    const abortController = new AbortController();
+    transcriptionAbortControllerRef.current = abortController;
     const now = new Date();
     const recordingId = `recording-${now.getTime()}`;
     const meetingId = `meeting-${now.getTime()}`;
@@ -1546,6 +1620,7 @@ function App() {
         method: 'POST',
         headers: await apiHeaders(activeProjectId),
         body,
+        signal: abortController.signal,
       });
 
       if (!response.ok) {
@@ -1554,31 +1629,8 @@ function App() {
       }
 
       const result = await response.json() as IntermediateTranscript;
+      if (transcriptionCancelledRef.current) throw new DOMException('전사가 취소되었습니다.', 'AbortError');
       const transcriptSegments = mapIntermediateTranscript(result);
-
-      // 전사문과 이 녹음에만 붙인 참고 자료를 같은 meeting_id로 Neo4j에 묶는다.
-      try {
-        const ingestResponse = await fetch('/api/ingest-stt', {
-          method: 'POST',
-          headers: {
-            ...(await apiHeaders(activeProjectId)),
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(result),
-        });
-        if (!ingestResponse.ok) {
-          const errorBody = await ingestResponse.json().catch(() => null) as { detail?: string } | null;
-          throw new Error(errorBody?.detail ?? `전사 그래프 반영 요청 실패 (${ingestResponse.status})`);
-        }
-        await Promise.all(recordingMaterialFiles.map((file, index) => (
-          isGraphIngestibleDocument(file)
-            ? uploadMaterialToGraph(file, recordingAttachedMaterials[index]?.id ?? '', activeProjectId, meetingId)
-            : Promise.resolve(false)
-        )));
-        setGraphReloadKey((value) => value + 1);
-      } catch (error) {
-        console.error('전사 결과를 그래프에 반영하지 못했습니다:', error);
-      }
       const savedTranscriptSegments = transcriptSegments;
       const timeLabel = now.toLocaleTimeString('ko-KR', {
         hour: '2-digit',
@@ -1598,6 +1650,7 @@ function App() {
           )
         )));
       }
+      if (transcriptionCancelledRef.current) throw new DOMException('전사가 취소되었습니다.', 'AbortError');
       const linkedMaterials = [
         ...projectMaterialsForTranscription.map((entry) => entry.source),
         ...persistedRecordingMaterials,
@@ -1639,6 +1692,7 @@ function App() {
           mimeType: audioRow.mime_type ?? undefined,
           sizeBytes: audioRow.size_bytes,
         };
+        if (transcriptionCancelledRef.current) throw new DOMException('전사가 취소되었습니다.', 'AbortError');
         await saveRecordingTranscript({
           client: supabase,
           userId: currentUser.id,
@@ -1649,6 +1703,7 @@ function App() {
           segments: savedTranscriptSegments,
         });
       }
+      if (transcriptionCancelledRef.current) throw new DOMException('전사가 취소되었습니다.', 'AbortError');
       if (recordedAudioUrl !== null) savedAudioUrlsRef.current.add(recordedAudioUrl);
       setSourceItems((currentSourceItems) => [
         savedRecording,
@@ -1671,14 +1726,44 @@ function App() {
       await new Promise((resolve) => window.setTimeout(resolve, 250));
       setTranscriptionState('done');
       setTranscriptionStep(3);
+      transcriptionAbortControllerRef.current = null;
+
+      // 녹음본과 전사문이 영구 저장된 뒤에만 그래프 적재를 시작한다.
+      if (savedRecording.storagePath !== undefined) {
+        void (async () => {
+          const ingestResponse = await fetch('/api/ingest-stt', {
+            method: 'POST',
+            headers: {
+              ...(await apiHeaders(activeProjectId)),
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(result),
+          });
+          if (!ingestResponse.ok) {
+            const errorBody = await ingestResponse.json().catch(() => null) as { detail?: string } | null;
+            throw new Error(errorBody?.detail ?? `전사 그래프 반영 요청 실패 (${ingestResponse.status})`);
+          }
+          await Promise.all(recordingMaterialFiles.map((file, index) => (
+            isGraphIngestibleDocument(file)
+              ? uploadMaterialToGraph(file, persistedRecordingMaterials[index]?.id ?? '', activeProjectId, meetingId)
+              : Promise.resolve(false)
+          )));
+          setGraphReloadKey((value) => value + 1);
+        })().catch((error) => {
+          console.error('전사 결과를 그래프에 반영하지 못했습니다:', error);
+        });
+      }
     } catch (error) {
+      transcriptionAbortControllerRef.current = null;
       if (supabase !== null) {
         void deleteProjectSource(supabase, recordingId, undefined, recordingId)
           .catch((cleanupError) => console.error('실패한 녹음 저장 정리 실패:', cleanupError));
       }
       setTranscriptionState('idle');
       setTranscriptionStep(0);
-      setTranscriptionError(error instanceof Error ? error.message : '전사 중 문제가 발생했습니다.');
+      if (!(error instanceof DOMException && error.name === 'AbortError')) {
+        setTranscriptionError(error instanceof Error ? error.message : '전사 중 문제가 발생했습니다.');
+      }
     }
   };
 
@@ -1696,54 +1781,188 @@ function App() {
   };
 
   const updateProject = (index: number, updates: Partial<(typeof projects)[number]>) => {
+    const currentProject = projects[index];
+    if (currentProject === undefined) return;
+    const updatedProject = { ...currentProject, ...updates, updatedAt: '방금' };
     setProjects((currentProjects) => currentProjects.map((project, projectIndex) => (
-      projectIndex === index ? { ...project, ...updates } : project
+      projectIndex === index ? updatedProject : project
     )));
+    persistProjectMetadata(updatedProject);
     setOpenProjectMenuIndex(null);
   };
 
-  const deleteProject = (index: number) => {
+  const moveProjectToTrash = (index: number) => {
     updateProject(index, { trashed: true });
   };
 
-  const emptyTrash = () => {
-    setProjects((currentProjects) => currentProjects.filter((project) => !project.trashed));
+  const requestPermanentProjectDeletion = (project: Project) => {
+    setProjectDeleteDialog({ kind: 'single', projectId: project.id, projectName: project.name });
+    setProjectDeleteError(null);
+    setProjectDeleteState('idle');
     setOpenProjectMenuIndex(null);
   };
 
-  const submitProjectChat = () => {
-    const query = chatInput.trim();
-    if (!query) return;
+  const permanentlyDeleteProjects = async (targets: Project[]) => {
+    const projectIds = targets.map((project) => project.id);
+    const storageClient = supabase;
+    if (storageClient !== null && currentUser !== null) {
+      await Promise.all(targets.map((project) => (
+        saveStoredProject(storageClient, currentUser.id, { ...project, trashed: true })
+      )));
+    }
+    const response = await fetch('/api/projects-data/delete', {
+      method: 'POST',
+      headers: {
+        ...(await apiHeaders(projectIds[0] ?? null)),
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ project_ids: projectIds }),
+    });
+    if (!response.ok) {
+      const errorBody = await response.json().catch(() => null) as { detail?: string } | null;
+      throw new Error(errorBody?.detail ?? '프로젝트 그래프 삭제에 실패했습니다.');
+    }
+    if (storageClient !== null) await deleteStoredProjects(storageClient, projectIds);
 
+    projectIds.forEach((projectId) => {
+      delete projectWorkspacesRef.current[projectId];
+      delete projectMaterialFilesRef.current[projectId];
+    });
+    persistProjectWorkspaces();
+    if (storageUserId !== null) {
+      const activeKey = scopedStorageKey(ACTIVE_PROJECT_STORAGE_KEY, storageUserId);
+      if (projectIds.includes(window.localStorage.getItem(activeKey) ?? '')) {
+        window.localStorage.removeItem(activeKey);
+      }
+    }
+    const deletedIds = new Set(projectIds);
+    setProjects((currentProjects) => currentProjects.filter((candidate) => !deletedIds.has(candidate.id)));
+  };
+
+  const confirmPermanentProjectDeletion = async () => {
+    if (projectDeleteDialog === null || projectDeleteState === 'deleting') return;
+    const targets = projectDeleteDialog.kind === 'single'
+      ? projects.filter((project) => project.id === projectDeleteDialog.projectId)
+      : projects.filter((project) => project.trashed);
+    if (targets.length === 0) {
+      setProjectDeleteDialog(null);
+      return;
+    }
+
+    setProjectDeleteState('deleting');
+    setProjectDeleteError(null);
+    try {
+      await permanentlyDeleteProjects(targets);
+      setProjectDeleteDialog(null);
+      setProjectDeleteState('idle');
+    } catch (error) {
+      setProjectDeleteState('idle');
+      setProjectDeleteError(error instanceof Error ? error.message : '프로젝트 삭제 중 문제가 발생했습니다.');
+    }
+  };
+
+  const submitProjectChat = (presetQuery?: string) => {
+    const query = (presetQuery ?? chatInput).trim();
+    if (!query) return;
+    if (chatRequestInFlightRef.current) {
+      if (presetQuery !== undefined) setChatInput(query);
+      return;
+    }
+
+    chatRequestInFlightRef.current = true;
+    setIsChatResponding(true);
+    setIsChatWaiting(true);
     setChatMessages((currentMessages) => [...currentMessages, { role: 'user', text: query }]);
-    setChatInput('');
+    if (presetQuery === undefined) setChatInput('');
 
     void (async () => {
-      let assistantText: string;
+      let assistantStarted = false;
+      let completed = false;
+
+      const appendAssistantDelta = (text: string) => {
+        if (!text) return;
+        setIsChatWaiting(false);
+        const isFirstDelta = !assistantStarted;
+        if (isFirstDelta) assistantStarted = true;
+        setChatMessages((currentMessages) => {
+          if (isFirstDelta) {
+            return [...currentMessages, { role: 'assistant', text }];
+          }
+          const nextMessages = [...currentMessages];
+          const lastIndex = nextMessages.length - 1;
+          nextMessages[lastIndex] = {
+            ...nextMessages[lastIndex],
+            text: `${nextMessages[lastIndex].text}${text}`,
+          };
+          return nextMessages;
+        });
+      };
+
+      const handleStreamEvent = (event: AskStreamEvent) => {
+        if (event.type === 'delta') {
+          appendAssistantDelta(event.text);
+          return;
+        }
+        if (event.type === 'error') throw new Error(event.message);
+        completed = true;
+        if (!assistantStarted && event.answer) appendAssistantDelta(event.answer);
+        setChatGraphExpansion(new Set((event.expansion?.nodes ?? []).map((node) => node.id)));
+      };
+
       try {
-        const response = await fetch(`/api/ask?project=${encodeURIComponent(activeProjectId ?? '')}&q=${encodeURIComponent(query)}&k=6`, {
+        const response = await fetch(`/api/ask-stream?project=${encodeURIComponent(activeProjectId ?? '')}&q=${encodeURIComponent(query)}&k=6`, {
           headers: await apiHeaders(activeProjectId),
         });
-        if (!response.ok) throw new Error(`/api/ask ${response.status}`);
-        const data = await response.json() as {
-          answer: string; hits?: { session_id: string }[];
-          expansion?: { nodes?: { id: string }[] };
-        };
-        assistantText = data.answer;
-        setChatGraphExpansion(new Set((data.expansion?.nodes ?? []).map((node) => node.id)));
+        if (!response.ok || response.body === null) {
+          throw new Error(`/api/ask-stream ${response.status}`);
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        while (true) {
+          const { value, done } = await reader.read();
+          buffer += decoder.decode(value, { stream: !done });
+          let newlineIndex = buffer.indexOf('\n');
+          while (newlineIndex >= 0) {
+            const line = buffer.slice(0, newlineIndex).trim();
+            buffer = buffer.slice(newlineIndex + 1);
+            if (line) handleStreamEvent(JSON.parse(line) as AskStreamEvent);
+            newlineIndex = buffer.indexOf('\n');
+          }
+          if (done) break;
+        }
+        if (buffer.trim()) handleStreamEvent(JSON.parse(buffer) as AskStreamEvent);
+        if (!completed) throw new Error('AI 응답 스트림이 완료되지 않았습니다.');
       } catch (error) {
         console.error('AI 답변을 받아오지 못했습니다:', error);
         setChatGraphExpansion(null);
         const hasRecordings = sourceItems.some((source) => source.category === '녹음본');
         const hasMaterials = sourceItems.some((source) => source.category === '자료');
-        assistantText = hasRecordings || hasMaterials
+        const fallbackText = hasRecordings || hasMaterials
           ? '추가된 녹음본과 자료를 기준으로 답변을 준비하고 있습니다. 관련 근거가 만들어지면 이 대화와 가운데 그래프에 함께 표시됩니다.'
           : '아직 참고할 녹음본이나 자료가 없습니다. 먼저 녹음본을 전사하거나 자료를 추가하면, 그 내용을 바탕으로 질문에 답할 수 있습니다.';
+        if (!assistantStarted) {
+          appendAssistantDelta(fallbackText);
+        } else {
+          appendAssistantDelta('\n\n_응답 연결이 중단되었습니다. 다시 질문해 주세요._');
+        }
+      } finally {
+        chatRequestInFlightRef.current = false;
+        setIsChatResponding(false);
+        setIsChatWaiting(false);
       }
-
-      setChatMessages((currentMessages) => [...currentMessages, { role: 'assistant', text: assistantText }]);
     })();
   };
+
+  useEffect(() => {
+    const thread = chatThreadRef.current;
+    if (thread === null) return;
+    const frame = window.requestAnimationFrame(() => {
+      thread.scrollTo({ top: thread.scrollHeight, behavior: 'smooth' });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [chatMessages, isChatResponding]);
 
   const isProjectWorkspace = activeProject !== null && !isProfileOpen && !isAdminOpen && !isHelpOpen;
   const showSidebar = false;
@@ -2457,7 +2676,19 @@ function App() {
                 ))}
               </div>
               {homeSection === '휴지통' && (
-                <button className="empty-trash-button" type="button" onClick={emptyTrash}>
+                <button
+                  className="empty-trash-button"
+                  type="button"
+                  disabled={!projects.some((project) => project.trashed)}
+                  onClick={() => {
+                    setProjectDeleteDialog({
+                      kind: 'empty',
+                      count: projects.filter((project) => project.trashed).length,
+                    });
+                    setProjectDeleteError(null);
+                    setProjectDeleteState('idle');
+                  }}
+                >
                   휴지통 비우기
                 </button>
               )}
@@ -2503,14 +2734,23 @@ function App() {
 
                     {openProjectMenuIndex === project.index && (
                       <div className="project-menu-popover">
-                        <button type="button" onClick={() => setOpenProjectMenuIndex(null)}>수정</button>
-                        <button type="button" onClick={() => updateProject(project.index, { favorite: !project.favorite })}>
-                          {project.favorite ? '즐겨찾기 해제' : '즐겨찾기'}
-                        </button>
                         {project.trashed ? (
-                          <button type="button" onClick={() => updateProject(project.index, { trashed: false })}>복원</button>
+                          <>
+                            <button type="button" onClick={() => updateProject(project.index, { trashed: false })}>복원</button>
+                            <button className="danger" type="button" onClick={() => requestPermanentProjectDeletion(project)}>
+                              영구 삭제
+                            </button>
+                          </>
                         ) : (
-                          <button className="danger" type="button" onClick={() => deleteProject(project.index)}>삭제</button>
+                          <>
+                            <button type="button" onClick={() => setOpenProjectMenuIndex(null)}>수정</button>
+                            <button type="button" onClick={() => updateProject(project.index, { favorite: !project.favorite })}>
+                              {project.favorite ? '즐겨찾기 해제' : '즐겨찾기'}
+                            </button>
+                            <button className="danger" type="button" onClick={() => moveProjectToTrash(project.index)}>
+                              휴지통으로 이동
+                            </button>
+                          </>
                         )}
                       </div>
                     )}
@@ -2757,6 +2997,9 @@ function App() {
                   projectName={activeProject.name}
                   reloadKey={graphReloadKey}
                   askExpansionIds={chatGraphExpansion}
+                  onAskAboutConcept={(label) => {
+                    submitProjectChat(`"${label}" 개념을 이 프로젝트의 강의 자료를 바탕으로 설명해줘`);
+                  }}
                 />
               </section>
 
@@ -2769,13 +3012,28 @@ function App() {
                 <button className="panel-mini-button" type="button" aria-label="대화 메뉴">⋮</button>
               </div>
 
-              <div className="studio-chat-thread">
+              <div className="studio-chat-thread" ref={chatThreadRef} aria-live="polite">
                 {chatMessages.map((message, index) => (
                   <article className={`chat-bubble ${message.role}`} key={`${message.role}-${index}`}>
                     <span>{message.role === 'assistant' ? 'SynapVox' : '나'}</span>
-                    <p>{message.text}</p>
+                    {message.role === 'assistant' ? (
+                      <MarkdownContent>{message.text}</MarkdownContent>
+                    ) : (
+                      <p>{message.text}</p>
+                    )}
                   </article>
                 ))}
+                {isChatWaiting && (
+                  <article className="chat-bubble assistant pending" aria-label="답변을 준비하는 중">
+                    <span>SynapVox</span>
+                    <div className="chat-pending-status">
+                      <i />
+                      <i />
+                      <i />
+                      <b>근거를 찾고 있어요</b>
+                    </div>
+                  </article>
+                )}
               </div>
 
               <form
@@ -2790,13 +3048,71 @@ function App() {
                   onChange={(event) => setChatInput(event.target.value)}
                   placeholder="프로젝트에 대해 질문하세요"
                 />
-                <button type="submit">→</button>
+                <button type="submit" disabled={isChatResponding} aria-label="질문 보내기">→</button>
               </form>
               </aside>
             </section>
           </>
         )}
       </main>
+
+      {projectDeleteDialog !== null && (
+        <div
+          className="auth-modal-backdrop"
+          role="presentation"
+          onMouseDown={() => {
+            if (projectDeleteState === 'deleting') return;
+            setProjectDeleteDialog(null);
+            setProjectDeleteError(null);
+          }}
+        >
+          <section
+            className={`project-delete-dialog ${projectDeleteDialog.kind === 'empty' ? 'bulk' : ''}`}
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="project-delete-dialog-title"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <p className="eyebrow">Permanent delete</p>
+            <h2 id="project-delete-dialog-title">
+              {projectDeleteDialog.kind === 'single'
+                ? '프로젝트를 영구 삭제할까요?'
+                : '휴지통을 모두 비울까요?'}
+            </h2>
+            <p>
+              {projectDeleteDialog.kind === 'single'
+                ? `“${projectDeleteDialog.projectName}”의 녹음본, 자료, 전사문과 그래프 데이터를 모두 삭제합니다.`
+                : `휴지통의 프로젝트 ${projectDeleteDialog.count}개와 그 안의 모든 데이터를 영구 삭제합니다.`}
+            </p>
+            <strong>삭제한 데이터는 복구할 수 없습니다.</strong>
+            {projectDeleteError !== null && (
+              <span className="project-delete-dialog-error">{projectDeleteError}</span>
+            )}
+            <div className="project-delete-dialog-actions">
+              <button
+                type="button"
+                disabled={projectDeleteState === 'deleting'}
+                onClick={() => {
+                  setProjectDeleteDialog(null);
+                  setProjectDeleteError(null);
+                }}
+              >
+                취소
+              </button>
+              <button
+                className="danger"
+                type="button"
+                disabled={projectDeleteState === 'deleting'}
+                onClick={() => void confirmPermanentProjectDeletion()}
+              >
+                {projectDeleteState === 'deleting'
+                  ? '삭제 중…'
+                  : projectDeleteDialog.kind === 'single' ? '영구 삭제' : '모두 영구 삭제'}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
 
       {authMode !== null && (
         <div className="auth-modal-backdrop" role="presentation" onMouseDown={closeAuthModal}>
@@ -2953,7 +3269,7 @@ function App() {
             <p>
               {sourceModalMode === 'source'
                 ? '이 프로젝트의 모든 녹음 전사와 AI 답변에 참고할 자료를 추가합니다.'
-                : '프로젝트 자료와 이번 녹음 참고자료를 함께 사용해 전사를 진행합니다.'}
+                : '프로젝트 공통 자료와 추가 참고자료를 함께 사용해 전사를 진행합니다.'}
             </p>
 
             {sourceModalMode === 'source' ? (
@@ -3074,7 +3390,7 @@ function App() {
                 >
                   <span aria-hidden="true">+</span>
                   <div>
-                    <strong>이번 녹음 참고자료 추가</strong>
+                    <strong>참고자료 추가</strong>
                     <p>이 녹음본 전사에만 추가로 참고됩니다.</p>
                   </div>
                 </div>
@@ -3092,9 +3408,9 @@ function App() {
                   <div className="record-reference-summary" aria-label="전사 참고자료">
                     <strong>전사 참고자료</strong>
                     <p>
-                      프로젝트 자료 {projectMaterialCount}개
+                      프로젝트 공통 자료 {projectMaterialCount}개
                       {' '}
-                      + 이번 녹음 자료 {recordingMaterialCount}개
+                      + 추가 자료 {recordingMaterialCount}개
                     </p>
                   </div>
                 )}
@@ -3108,7 +3424,7 @@ function App() {
                     ))}
                     {recordingAttachedMaterials.map((material) => (
                       <span key={material.id}>
-                        <b>이번</b>
+                        <b>자료</b>
                         {material.title}
                       </span>
                     ))}
@@ -3187,7 +3503,9 @@ function App() {
                       {transcriptionState === 'transcribing' ? '전사 중...' : transcriptionState === 'done' ? '다시 전사하기' : '전사하기'}
                     </button>
                   )}
-                  <button className="secondary" type="button" onClick={closeSourceModal}>닫기</button>
+                  <button className="secondary" type="button" onClick={closeSourceModal}>
+                    {transcriptionState === 'transcribing' ? '전사 취소' : '닫기'}
+                  </button>
                 </div>
               </div>
             )}

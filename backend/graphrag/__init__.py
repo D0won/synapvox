@@ -19,10 +19,11 @@ integration 계층(D)이 소비하는 공개 API:
 
 from .graph_store import GraphStore
 from .vector_store import VectorStore, hashing_embed, openai_embed
-from .search import HybridSearch
+from .search import HybridSearch, expansion_from_hits
 from .queries import (timeline, meetings_by_topic, decision_history, graph_data,
                       concept_detail, session_detail, expansion_for_chunks)
 
 __all__ = ["GraphStore", "VectorStore", "hashing_embed", "openai_embed", "HybridSearch",
+           "expansion_from_hits",
            "timeline", "meetings_by_topic", "decision_history", "graph_data",
            "concept_detail", "session_detail", "expansion_for_chunks"]

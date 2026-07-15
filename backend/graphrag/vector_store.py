@@ -20,6 +20,7 @@ Session pooler에서 복사.
 
 import hashlib
 import os
+from functools import lru_cache
 
 import psycopg2
 from psycopg2.extras import execute_values
@@ -41,11 +42,24 @@ def hashing_embed(text: str, dim: int = 256) -> list[float]:
 
 def openai_embed(text: str, model: str = "text-embedding-3-small") -> list[float]:
     """VectorStore의 기본 embed_fn (임시 — 모델 선택은 팀 확정 전, 추후 변경될 수 있음)."""
+    normalized = " ".join((text or "").split())
+    return list(_cached_openai_embed(normalized, model))
+
+
+@lru_cache(maxsize=256)
+def _cached_openai_embed(text: str, model: str) -> tuple[float, ...]:
+    """Reuse embeddings for repeated chat questions without caching ingest batches."""
+    return tuple(openai_embed_many([text], model=model)[0])
+
+
+def openai_embed_many(texts: list[str], model: str = "text-embedding-3-small") -> list[list[float]]:
+    """여러 청크를 OpenAI 임베딩 API 한 번으로 처리한다."""
     global _openai_client
     if _openai_client is None:
         from openai import OpenAI
         _openai_client = OpenAI()
-    return _openai_client.embeddings.create(model=model, input=text or "").data[0].embedding
+    response = _openai_client.embeddings.create(model=model, input=[text or "" for text in texts])
+    return [item.embedding for item in sorted(response.data, key=lambda item: item.index)]
 
 
 class VectorStore:
@@ -60,13 +74,14 @@ class VectorStore:
             cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
             cur.execute(f"""
                 CREATE TABLE IF NOT EXISTS {self.table} (
-                    chunk_id TEXT PRIMARY KEY,
+                    chunk_id TEXT NOT NULL,
                     project_id TEXT NOT NULL,
                     meeting_id TEXT,
                     source_type TEXT NOT NULL DEFAULT 'unknown',
                     chunk_text TEXT NOT NULL,
                     embedding VECTOR NOT NULL,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    PRIMARY KEY (project_id, chunk_id)
                 );
             """)
             cur.execute(f"CREATE INDEX IF NOT EXISTS {self.table}_project_id_idx ON {self.table} (project_id);")
@@ -76,18 +91,24 @@ class VectorStore:
         """chunk = {chunk_id, text, source_type}. 임베딩 후 메타데이터와 함께 upsert."""
         if not chunks:
             return
+        texts = [chunk.get("text", "") for chunk in chunks]
+        embeddings = (
+            openai_embed_many(texts)
+            if self.embed_fn is openai_embed
+            else [self.embed_fn(text) for text in texts]
+        )
         rows = [
             (c["chunk_id"], project_id, meeting_id, c.get("source_type") or "unknown",
-             c.get("text", ""), self.embed_fn(c.get("text", "")))
-            for c in chunks
+             text, embedding)
+            for c, text, embedding in zip(chunks, texts, embeddings, strict=True)
         ]
         with self.conn.cursor() as cur:
             execute_values(
                 cur,
                 f"""INSERT INTO {self.table} (chunk_id, project_id, meeting_id, source_type, chunk_text, embedding)
                     VALUES %s
-                    ON CONFLICT (chunk_id) DO UPDATE SET
-                        project_id = EXCLUDED.project_id, meeting_id = EXCLUDED.meeting_id,
+                    ON CONFLICT (project_id, chunk_id) DO UPDATE SET
+                        meeting_id = EXCLUDED.meeting_id,
                         source_type = EXCLUDED.source_type, chunk_text = EXCLUDED.chunk_text,
                         embedding = EXCLUDED.embedding""",
                 rows,
@@ -116,6 +137,17 @@ class VectorStore:
     def reset(self, project_id: str):
         with self.conn.cursor() as cur:
             cur.execute(f"DELETE FROM {self.table} WHERE project_id = %s", (project_id,))
+        self.conn.commit()
+
+    def reset_many(self, project_ids: list[str]):
+        """Delete several project namespaces in one Postgres transaction."""
+        if not project_ids:
+            return
+        with self.conn.cursor() as cur:
+            cur.execute(
+                f"DELETE FROM {self.table} WHERE project_id = ANY(%s)",
+                (project_ids,),
+            )
         self.conn.commit()
 
     def delete_meeting(self, project_id: str, meeting_id: str) -> int:

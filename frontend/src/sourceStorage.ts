@@ -2,6 +2,21 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 
 const SOURCE_BUCKET = 'project-files';
 
+export type StoredProjectRow = {
+  id: string;
+  owner_id: string;
+  name: string;
+  description: string;
+  status: string;
+  recordings: number;
+  materials: number;
+  favorite: boolean;
+  shared: boolean;
+  trashed_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 export type StoredSourceRow = {
   id: string;
   owner_id: string;
@@ -41,8 +56,77 @@ type UploadSourceInput = {
   sourcePayload: Record<string, unknown>;
 };
 
+type StoredProjectInput = {
+  id: string;
+  name: string;
+  description: string;
+  status: string;
+  recordings: number;
+  materials: number;
+  favorite?: boolean;
+  shared?: boolean;
+  trashed?: boolean;
+};
+
 const safePathPart = (value: string) => (
   value.normalize('NFKD').replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'file'
+);
+
+export const loadStoredProjects = async (client: SupabaseClient) => {
+  const { data, error } = await client
+    .from('projects')
+    .select('*')
+    .order('updated_at', { ascending: false });
+  if (error) throw error;
+  return (data ?? []) as StoredProjectRow[];
+};
+
+export const saveStoredProject = async (
+  client: SupabaseClient,
+  userId: string,
+  project: StoredProjectInput,
+) => {
+  const { error } = await client.from('projects').upsert({
+    id: project.id,
+    owner_id: userId,
+    name: project.name,
+    description: project.description,
+    status: project.status,
+    recordings: project.recordings,
+    materials: project.materials,
+    favorite: project.favorite ?? false,
+    shared: project.shared ?? false,
+    trashed_at: project.trashed ? new Date().toISOString() : null,
+    updated_at: new Date().toISOString(),
+  }, { onConflict: 'id' });
+  if (error) throw error;
+};
+
+export const deleteStoredProjects = async (client: SupabaseClient, projectIds: string[]) => {
+  if (projectIds.length === 0) return;
+  const { data, error: sourceError } = await client
+    .from('project_sources')
+    .select('storage_path')
+    .in('project_id', projectIds);
+  if (sourceError) throw sourceError;
+
+  const paths = (data ?? []).map((row) => row.storage_path as string);
+  if (paths.length > 0) {
+    const { error } = await client.storage.from(SOURCE_BUCKET).remove(paths);
+    if (error) throw error;
+  }
+
+  const [{ error: sourceDeleteError }, { error: projectError }] = await Promise.all([
+    client.from('project_sources').delete().in('project_id', projectIds),
+    client.from('projects').delete().in('id', projectIds),
+  ]);
+  // recording_transcripts is removed by the project_sources foreign-key cascade.
+  if (sourceDeleteError) throw sourceDeleteError;
+  if (projectError) throw projectError;
+};
+
+export const deleteStoredProject = async (client: SupabaseClient, projectId: string) => (
+  deleteStoredProjects(client, [projectId])
 );
 
 export const uploadProjectSource = async ({

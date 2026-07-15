@@ -101,9 +101,12 @@ class GraphStore:
     def _rebuild_follows(self, project_id):
         """회의 date 순서로 FOLLOWS 재구성 (시간별 정리의 축)."""
         with self._session() as s:
-            s.run(f"MATCH (:{S.MEETING} {{project_id:$pid}})-[r:{S.FOLLOWS}]->() DELETE r", pid=project_id)
             s.run(
-                f"MATCH (m:{S.MEETING} {{project_id:$pid}}) WITH m ORDER BY m.date, m.meeting_id "
+                f"MATCH (m:{S.MEETING} {{project_id:$pid}}) "
+                f"OPTIONAL MATCH (m)-[r:{S.FOLLOWS}]->() "
+                "WITH m, collect(r) AS follows "
+                "FOREACH (rel IN follows | DELETE rel) "
+                "WITH DISTINCT m ORDER BY m.date, m.meeting_id "
                 f"WITH collect(m) AS ms "
                 f"UNWIND CASE WHEN size(ms) < 2 THEN [] ELSE range(0, size(ms)-2) END AS i "
                 f"WITH ms[i] AS a, ms[i+1] AS b MERGE (a)-[:{S.FOLLOWS}]->(b)",
@@ -113,27 +116,51 @@ class GraphStore:
         with self._session() as s:
             s.run("MATCH (n {project_id:$pid}) DETACH DELETE n", pid=project_id)
 
+    def reset_many(self, project_ids: list[str]):
+        """Delete several project namespaces in one Neo4j round trip."""
+        if not project_ids:
+            return
+        with self._session() as s:
+            s.run(
+                "MATCH (n) WHERE n.project_id IN $project_ids DETACH DELETE n",
+                project_ids=project_ids,
+            )
+
     def _prune_orphans(self, session, project_id: str):
         session.run(
-            f"MATCH (m:{S.MEETING} {{project_id:$pid}})-[r:{S.DISCUSSES}]->(t:{S.TOPIC} {{project_id:$pid}}) "
-            f"WHERE NOT EXISTS {{ MATCH (m)-[:{S.HAS_CHUNK}]->(:{S.CHUNK})-[:{S.DISCUSSES}]->(t) }} "
-            "DELETE r",
-            pid=project_id,
-        )
-        session.run(
-            f"MATCH (t:{S.TOPIC} {{project_id:$pid}}) "
-            f"WHERE NOT EXISTS {{ MATCH (:{S.CHUNK} {{project_id:$pid}})-[:{S.DISCUSSES}]->(t) }} "
-            "DETACH DELETE t",
-            pid=project_id,
-        )
-        session.run(
-            f"MATCH (d:{S.DECISION} {{project_id:$pid}}) "
-            f"WHERE NOT (d)-[:{S.DECIDED_IN}]->(:{S.MEETING}) DETACH DELETE d",
-            pid=project_id,
-        )
-        session.run(
-            f"MATCH (a:{S.ACTION_ITEM} {{project_id:$pid}}) "
-            f"WHERE NOT (a)-[:{S.RAISED_IN}]->(:{S.MEETING}) DETACH DELETE a",
+            f"""
+            CALL () {{
+              MATCH (m:{S.MEETING} {{project_id:$pid}})
+              WHERE NOT (m)-[:{S.HAS_CHUNK}]->(:{S.CHUNK})
+              DETACH DELETE m
+              RETURN count(m) AS removed_meetings
+            }}
+            CALL () {{
+              MATCH (m:{S.MEETING} {{project_id:$pid}})-[r:{S.DISCUSSES}]->(t:{S.TOPIC} {{project_id:$pid}})
+              WHERE NOT EXISTS {{ MATCH (m)-[:{S.HAS_CHUNK}]->(:{S.CHUNK})-[:{S.DISCUSSES}]->(t) }}
+              DELETE r
+              RETURN count(r) AS removed_discusses
+            }}
+            CALL () {{
+              MATCH (t:{S.TOPIC} {{project_id:$pid}})
+              WHERE NOT EXISTS {{ MATCH (:{S.CHUNK} {{project_id:$pid}})-[:{S.DISCUSSES}]->(t) }}
+              DETACH DELETE t
+              RETURN count(t) AS removed_topics
+            }}
+            CALL () {{
+              MATCH (d:{S.DECISION} {{project_id:$pid}})
+              WHERE NOT (d)-[:{S.DECIDED_IN}]->(:{S.MEETING})
+              DETACH DELETE d
+              RETURN count(d) AS removed_decisions
+            }}
+            CALL () {{
+              MATCH (a:{S.ACTION_ITEM} {{project_id:$pid}})
+              WHERE NOT (a)-[:{S.RAISED_IN}]->(:{S.MEETING})
+              DETACH DELETE a
+              RETURN count(a) AS removed_actions
+            }}
+            RETURN removed_meetings, removed_discusses, removed_topics, removed_decisions, removed_actions
+            """,
             pid=project_id,
         )
 
@@ -143,22 +170,18 @@ class GraphStore:
             record = s.run(
                 f"MATCH (m:{S.MEETING} {{project_id:$pid, meeting_id:$mid}}) "
                 f"OPTIONAL MATCH (m)-[:{S.HAS_CHUNK}]->(c:{S.CHUNK}) "
-                "RETURN count(DISTINCT c) AS chunks",
+                "WITH m, collect(DISTINCT c) AS chunks "
+                "CALL (chunks) { "
+                "  UNWIND chunks AS chunk DETACH DELETE chunk RETURN count(chunk) AS deleted "
+                "} "
+                "DETACH DELETE m "
+                "RETURN deleted AS chunks",
                 pid=project_id,
                 mid=meeting_id,
             ).single()
+            if record is None:
+                return 0
             deleted = int(record["chunks"] if record else 0)
-            s.run(
-                f"MATCH (m:{S.MEETING} {{project_id:$pid, meeting_id:$mid}})-[:{S.HAS_CHUNK}]->(c:{S.CHUNK}) "
-                "DETACH DELETE c",
-                pid=project_id,
-                mid=meeting_id,
-            )
-            s.run(
-                f"MATCH (m:{S.MEETING} {{project_id:$pid, meeting_id:$mid}}) DETACH DELETE m",
-                pid=project_id,
-                mid=meeting_id,
-            )
             self._prune_orphans(s, project_id)
         self._rebuild_follows(project_id)
         return deleted
@@ -167,28 +190,19 @@ class GraphStore:
         """Delete one document's chunks while preserving other sources in the same meeting."""
         with self._session() as s:
             record = s.run(
-                f"MATCH (m:{S.MEETING} {{project_id:$pid}})-[:{S.HAS_CHUNK}]->"
-                f"(c:{S.CHUNK} {{project_id:$pid}}) "
+                f"MATCH (c:{S.CHUNK} {{project_id:$pid}}) "
                 "WHERE c.chunk_id STARTS WITH $prefix "
-                "RETURN collect(DISTINCT m.meeting_id) AS meetings, count(DISTINCT c) AS chunks",
+                "WITH collect(DISTINCT c) AS chunks "
+                "CALL (chunks) { "
+                "  UNWIND chunks AS chunk DETACH DELETE chunk RETURN count(chunk) AS deleted "
+                "} "
+                "RETURN deleted AS chunks",
                 pid=project_id,
                 prefix=chunk_prefix,
             ).single()
-            meeting_ids = list(record["meetings"] or []) if record else []
             deleted = int(record["chunks"] if record else 0)
-            s.run(
-                f"MATCH (c:{S.CHUNK} {{project_id:$pid}}) WHERE c.chunk_id STARTS WITH $prefix "
-                "DETACH DELETE c",
-                pid=project_id,
-                prefix=chunk_prefix,
-            )
-            for meeting_id in meeting_ids:
-                s.run(
-                    f"MATCH (m:{S.MEETING} {{project_id:$pid, meeting_id:$mid}}) "
-                    f"WHERE NOT (m)-[:{S.HAS_CHUNK}]->(:{S.CHUNK}) DETACH DELETE m",
-                    pid=project_id,
-                    mid=meeting_id,
-                )
+            if deleted == 0:
+                return 0
             self._prune_orphans(s, project_id)
         self._rebuild_follows(project_id)
         return deleted

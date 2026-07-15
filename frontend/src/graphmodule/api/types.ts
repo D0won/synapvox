@@ -31,6 +31,7 @@ export type ConceptDetail = {
   label: string
   summary: string | null
   sessions: { sid: string; title: string; snippet?: string }[]
+  relatedConcepts: { id: string; label: string }[]
 }
 
 export type SessionDetail = {

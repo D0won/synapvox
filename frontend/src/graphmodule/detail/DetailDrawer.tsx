@@ -21,8 +21,9 @@ export function DetailDrawer(props: {
   state: DetailState
   onClose(): void
   onAskAbout(label: string): void
+  onOpenConcept(id: string, label: string): void
 }): JSX.Element | null {
-  const { state, onClose, onAskAbout } = props
+  const { state, onClose, onAskAbout, onOpenConcept } = props
   const isOpen = state.status !== 'idle'
 
   // Esc closes while the drawer is open (mirrors the header ✕).
@@ -58,10 +59,14 @@ export function DetailDrawer(props: {
         ) : null}
 
         {state.status === 'ready' && state.kind === 'concept' && state.concept ? (
-          <ConceptView concept={state.concept} onAskAbout={onAskAbout} />
+          <ConceptView
+            concept={state.concept}
+            onAskAbout={onAskAbout}
+            onOpenConcept={onOpenConcept}
+          />
         ) : null}
         {state.status === 'ready' && state.kind === 'session' && state.session ? (
-          <SessionView session={state.session} />
+          <SessionView session={state.session} onOpenConcept={onOpenConcept} />
         ) : null}
       </div>
     </div>
@@ -71,8 +76,9 @@ export function DetailDrawer(props: {
 function ConceptView(props: {
   concept: ConceptDetail
   onAskAbout(label: string): void
+  onOpenConcept(id: string, label: string): void
 }): JSX.Element {
-  const { concept, onAskAbout } = props
+  const { concept, onAskAbout, onOpenConcept } = props
   return (
     <>
       <h2 className="detail__title">{concept.label}</h2>
@@ -82,6 +88,29 @@ function ConceptView(props: {
       ) : (
         <p className="detail__summary detail__summary--empty">요약이 아직 없습니다.</p>
       )}
+
+      <section className="detail__section">
+        <h3 className="detail__section-title">
+          관련 개념 <span className="detail__count">{concept.relatedConcepts.length}</span>
+        </h3>
+        {concept.relatedConcepts.length > 0 ? (
+          <ul className="detail__chips">
+            {concept.relatedConcepts.map((related) => (
+              <li key={related.id}>
+                <button
+                  type="button"
+                  className="detail__chip detail__chip--button"
+                  onClick={() => onOpenConcept(related.id, related.label)}
+                >
+                  {related.label}
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="detail__empty">직접 연결된 관련 개념이 없습니다.</p>
+        )}
+      </section>
 
       <section className="detail__section">
         <h3 className="detail__section-title">
@@ -106,14 +135,17 @@ function ConceptView(props: {
         className="detail__ask"
         onClick={() => onAskAbout(concept.label)}
       >
-        이 개념 질문
+        AI 대화에서 질문
       </button>
     </>
   )
 }
 
-function SessionView(props: { session: SessionDetail }): JSX.Element {
-  const { session } = props
+function SessionView(props: {
+  session: SessionDetail
+  onOpenConcept(id: string, label: string): void
+}): JSX.Element {
+  const { session, onOpenConcept } = props
   const snippet = session.text ? truncate(session.text, SNIPPET_MAX) : ''
   return (
     <>
@@ -132,8 +164,14 @@ function SessionView(props: { session: SessionDetail }): JSX.Element {
         {session.concepts.length > 0 ? (
           <ul className="detail__chips">
             {session.concepts.map((c) => (
-              <li key={c.id} className="detail__chip">
-                {c.label}
+              <li key={c.id}>
+                <button
+                  type="button"
+                  className="detail__chip detail__chip--button"
+                  onClick={() => onOpenConcept(c.id, c.label)}
+                >
+                  {c.label}
+                </button>
               </li>
             ))}
           </ul>
