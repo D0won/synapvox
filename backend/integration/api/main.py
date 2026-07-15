@@ -9,6 +9,7 @@ import importlib.util
 import json
 import logging
 import re
+import time
 import zipfile
 from datetime import date
 from pathlib import Path
@@ -118,10 +119,12 @@ def _extract_pdf_text(path: Path, describe_images: bool | None = None) -> str:
     return "\n".join(part for part in parts if part).strip()
 
 
-def _extract_pptx_text(path: Path) -> str:
+def _extract_pptx_text(path: Path, describe_images: bool | None = None) -> str:
     try:
         ppt = _load_stt_module("ppt_extractor")
-        result = ppt.extract_pptx(str(path))
+        if describe_images is None:
+            describe_images = bool(os.getenv("OPENAI_API_KEY"))
+        result = ppt.extract_pptx(str(path), describe_images=describe_images)
     except Exception:
         return ""
 
@@ -143,14 +146,16 @@ def _extract_material_text(path: Path, filename: str | None, content_type: str |
     if suffix in {".docx"}:
         return _extract_docx_text(path)
     if suffix in {".pptx"}:
-        return _extract_pptx_text(path)
+        return _extract_pptx_text(path, describe_images=describe_images)
     return ""
 
 
 def _join_material_texts(materials: list[tuple[Path, str | None, str | None]]) -> str | None:
     parts = []
     for path, filename, content_type in materials:
-        text = _extract_material_text(path, filename, content_type)
+        # 전사 시작 경로에서는 텍스트만 빠르게 읽는다. 이미지 설명은 파일마다 별도의
+        # Vision 호출이 발생하므로 자료 그래프 적재 경로에서 따로 수행한다.
+        text = _extract_material_text(path, filename, content_type, describe_images=False)
         if text:
             parts.append(f"# {filename or path.name}\n{text}")
     if not parts:
@@ -196,10 +201,18 @@ def _dev_transcript(source: str, project_id: str, meeting_id: str) -> dict:
 def _transcribe_with_clova(audio_path: str, source: str, project_id: str, meeting_id: str, material_text: str | None = None) -> dict:
     clova = _load_stt_module("stt_clova")
 
+    clova_started = time.perf_counter()
     if material_text and hasattr(clova, "transcribe_with_materials"):
         raw_result = clova.transcribe_with_materials(audio_path, material_text=material_text)
     else:
         raw_result = clova.transcribe(audio_path)
+    logger.info(
+        "stt.clova completed project=%s meeting=%s elapsed=%.2fs segments=%d",
+        project_id,
+        meeting_id,
+        time.perf_counter() - clova_started,
+        len(raw_result.get("segments") or []),
+    )
     data = wrap_segments(
         raw_result["segments"],
         source=source,
@@ -211,8 +224,19 @@ def _transcribe_with_clova(audio_path: str, source: str, project_id: str, meetin
     if material_text and os.getenv("OPENAI_API_KEY"):
       try:
           refiner = _load_stt_module("refine_transcript")
+          refinement_started = time.perf_counter()
           data = refiner.refine_transcript(data, material_text=material_text)
-          data["refinement"] = {"enabled": True}
+          data["refinement"] = {
+              "enabled": True,
+              "model": refiner.refinement_model(),
+          }
+          logger.info(
+              "stt.refinement completed project=%s meeting=%s model=%s elapsed=%.2fs",
+              project_id,
+              meeting_id,
+              refiner.refinement_model(),
+              time.perf_counter() - refinement_started,
+          )
       except Exception as exc:
           data["refinement"] = {"enabled": False, "error": str(exc)}
     else:
@@ -271,7 +295,16 @@ async def transcribe_recording(
                     temp_material.write(chunk)
             material_paths.append((material_path, material.filename, material.content_type))
 
+        material_started = time.perf_counter()
         material_text = _join_material_texts(material_paths)
+        logger.info(
+            "stt.materials extracted project=%s meeting=%s files=%d chars=%d elapsed=%.2fs",
+            project_id,
+            meeting_id,
+            len(material_paths),
+            len(material_text or ""),
+            time.perf_counter() - material_started,
+        )
 
         has_clova = bool(os.getenv("CLOVA_SPEECH_INVOKE_URL") and os.getenv("CLOVA_SPEECH_SECRET"))
         if not has_clova:
@@ -338,6 +371,61 @@ def _owned_source_record(user_id: str, source_id: str) -> dict | None:
         ("id", "project_id", "recording_id", "kind", "original_name", "source_payload"),
         row,
     ))
+
+
+def _owned_source_bundle_records(user_id: str, source: dict) -> list[dict]:
+    """Return a recording and all recording-scoped materials, or one standalone material."""
+    recording_id = source.get("recording_id")
+    if not recording_id:
+        return [source]
+    import psycopg2
+
+    with psycopg2.connect(os.environ["SUPABASE_DB_URL"]) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT id, project_id, recording_id, kind, original_name, source_payload
+                   FROM public.project_sources
+                   WHERE owner_id = %s AND recording_id = %s""",
+                (user_id, recording_id),
+            )
+            rows = cursor.fetchall()
+    keys = ("id", "project_id", "recording_id", "kind", "original_name", "source_payload")
+    return [dict(zip(keys, row)) for row in rows]
+
+
+def _store_source_graph_episode_ids(user_id: str, source_id: str,
+                                    episode_ids: list[str]) -> None:
+    """Persist Graphiti episode ownership so source deletion can be exact."""
+    if not episode_ids:
+        return
+    import psycopg2
+
+    with psycopg2.connect(os.environ["SUPABASE_DB_URL"]) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """UPDATE public.project_sources
+                   SET source_payload = coalesce(source_payload, '{}'::jsonb)
+                       || jsonb_build_object('graphEpisodeIds', %s::jsonb),
+                       updated_at = now()
+                   WHERE id = %s AND owner_id = %s""",
+                (json.dumps(episode_ids), source_id, user_id),
+            )
+
+
+def _owned_recording_source_id(user_id: str, project_id: str,
+                               meeting_id: str) -> str | None:
+    import psycopg2
+
+    with psycopg2.connect(os.environ["SUPABASE_DB_URL"]) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT recording_id FROM public.recording_transcripts
+                   WHERE owner_id = %s AND project_id = %s AND meeting_id = %s
+                   LIMIT 1""",
+                (user_id, project_id, meeting_id),
+            )
+            row = cursor.fetchone()
+    return str(row[0]) if row else None
 
 
 def _owned_project_record(user_id: str, project_id: str) -> dict | None:
@@ -438,10 +526,12 @@ def _delete_project_rows(user_id: str, project_id: str) -> list[str]:
                 "DELETE FROM public.recording_transcripts WHERE project_id = %s AND owner_id = %s",
                 (project_id, user_id),
             )
-            cursor.execute(
-                "DELETE FROM public.chat_sessions WHERE project_id = %s AND owner_id = %s",
-                (project_id, user_id),
-            )
+            cursor.execute("SELECT to_regclass('public.chat_sessions')")
+            if cursor.fetchone()[0] is not None:
+                cursor.execute(
+                    "DELETE FROM public.chat_sessions WHERE project_id = %s AND owner_id = %s",
+                    (project_id, user_id),
+                )
             cursor.execute(
                 "DELETE FROM public.project_sources WHERE project_id = %s AND owner_id = %s",
                 (project_id, user_id),
@@ -519,6 +609,15 @@ async def ingest_stt_to_graph(
     try:
         result = await run_in_threadpool(
             _gsvx_client().ingest_transcript, transcript, project_id)
+        source_id = await run_in_threadpool(
+            _owned_recording_source_id, user_id, project_id, meeting_id)
+        if source_id:
+            await run_in_threadpool(
+                _store_source_graph_episode_ids,
+                user_id,
+                source_id,
+                [str(value) for value in result.get("sessions", []) if value],
+            )
         return {"project": project_id, "meeting": meeting_id, **result}
     except Exception as exc:
         raise _graphiti_error(exc) from exc
@@ -536,6 +635,11 @@ async def ingest_doc_to_graph(
     """자료 텍스트를 현재 프로젝트에 적재한다. X-Meeting-Id가 있으면 해당 녹음본에 연결한다."""
     if not x_project_id:
         raise HTTPException(status_code=400, detail="X-Project-Id is required")
+    user_id = str(user.get("sub") or "")
+    if x_source_id:
+        source = await run_in_threadpool(_owned_source_record, user_id, x_source_id)
+        if source is None or source["project_id"] != x_project_id:
+            raise HTTPException(status_code=404, detail="source not found")
 
     suffix = Path(file.filename or "").suffix or ".bin"
     temp_path = None
@@ -563,6 +667,13 @@ async def ingest_doc_to_graph(
                 x_project_id,
                 x_meeting_id,
             )
+            if x_source_id:
+                await run_in_threadpool(
+                    _store_source_graph_episode_ids,
+                    user_id,
+                    x_source_id,
+                    [str(value) for value in result.get("sessions", []) if value],
+                )
             return {
                 "project": x_project_id,
                 "meeting": x_meeting_id,
@@ -582,15 +693,53 @@ async def delete_source_graph(
     source_id: str = Query(..., min_length=1),
     user: dict = Depends(require_user),
 ) -> dict:
-    """Refuse unsafe partial deletion until the Graphiti service exposes it."""
+    """Delete every Graphiti episode owned by one source or recording bundle."""
     user_id = str(user.get("sub") or "")
     source = await run_in_threadpool(_owned_source_record, user_id, source_id)
     if source is None:
         raise HTTPException(status_code=404, detail="source not found")
-    raise HTTPException(
-        status_code=501,
-        detail="Graphiti API에 개별 세션 삭제 기능이 아직 없어 삭제하지 않았습니다.",
-    )
+    records = await run_in_threadpool(_owned_source_bundle_records, user_id, source)
+    episode_ids: set[str] = set()
+    client = _gsvx_client()
+    meeting_ids: set[str] = set()
+    for record in records:
+        payload = record.get("source_payload") or {}
+        if isinstance(payload, dict):
+            episode_ids.update(
+                str(value) for value in payload.get("graphEpisodeIds", []) if value
+            )
+            meeting_id = payload.get("graphMeetingId")
+            if isinstance(meeting_id, str) and meeting_id:
+                meeting_ids.add(meeting_id)
+
+    # Compatibility for sources ingested before graphEpisodeIds was persisted.
+    for meeting_id in meeting_ids:
+        episode_ids.update(await run_in_threadpool(
+            client.find_episode_ids,
+            source["project_id"],
+            meeting_id=meeting_id,
+        ))
+    for record in records:
+        if record.get("kind") != "document":
+            continue
+        title = Path(str(record.get("original_name") or "자료")).stem
+        episode_ids.update(await run_in_threadpool(
+            client.find_episode_ids,
+            source["project_id"],
+            title=title,
+        ))
+
+    deleted = 0
+    for episode_id in episode_ids:
+        try:
+            await run_in_threadpool(client.delete_episode, episode_id)
+            deleted += 1
+        except Exception as exc:
+            from backend.integration.gsvx_connector import GsvxError
+            if isinstance(exc, GsvxError) and exc.status_code == 404:
+                continue
+            raise _graphiti_error(exc) from exc
+    return {"source_id": source_id, "episodes_deleted": deleted}
 
 
 @app.get("/api/graph")

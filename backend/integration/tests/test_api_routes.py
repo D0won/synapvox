@@ -93,11 +93,17 @@ def test_api_ingest_stt_uses_active_project(monkeypatch):
             captured["project"] = project
             return {
                 "chunks_ingested": 1, "concepts_new": 1,
-                "concepts_total": 1, "relations_new": 0,
+                "concepts_total": 1, "relations_new": 0, "sessions": ["episode-1"],
             }
 
     monkeypatch.setattr(api_main, "_gsvx_client", lambda: _Graphiti())
     monkeypatch.setattr(api_main, "_owned_transcript_exists", lambda user, project, meeting: True)
+    monkeypatch.setattr(api_main, "_owned_recording_source_id", lambda user, project, meeting: "recording-1")
+    monkeypatch.setattr(
+        api_main,
+        "_store_source_graph_episode_ids",
+        lambda user, source, episodes: captured.update(source=source, episodes=episodes),
+    )
     transcript = {
         "source": "lecture.wav",
         "meeting_id": "lecture-01",
@@ -118,6 +124,8 @@ def test_api_ingest_stt_uses_active_project(monkeypatch):
     assert response.status_code == 200
     assert response.json()["project"] == "project-uuid"
     assert captured["project"] == "project-uuid"
+    assert captured["source"] == "recording-1"
+    assert captured["episodes"] == ["episode-1"]
 
 
 def test_api_ingest_doc_stores_text_file(monkeypatch):
@@ -128,10 +136,19 @@ def test_api_ingest_doc_stores_text_file(monkeypatch):
             captured.update(text=text, title=title, project=project, meeting=meeting)
             return {
                 "chunks_ingested": 1, "concepts_new": 1,
-                "concepts_total": 1, "relations_new": 0,
+                "concepts_total": 1, "relations_new": 0, "sessions": ["episode-doc"],
             }
 
     monkeypatch.setattr(api_main, "_gsvx_client", lambda: _Graphiti())
+    monkeypatch.setattr(api_main, "_owned_source_record", lambda user, source: {
+        "id": source, "project_id": "project-uuid", "recording_id": None,
+        "kind": "document", "original_name": "notes.txt", "source_payload": {},
+    })
+    monkeypatch.setattr(
+        api_main,
+        "_store_source_graph_episode_ids",
+        lambda user, source, episodes: captured.update(stored=(source, episodes)),
+    )
 
     response = TestClient(app).post(
         "/api/ingest-doc",
@@ -154,11 +171,13 @@ def test_api_ingest_doc_stores_text_file(monkeypatch):
         "concepts_new": 1,
         "concepts_total": 1,
         "relations_new": 0,
+        "sessions": ["episode-doc"],
     }
-    assert captured == {
-        "text": "graph theory notes", "title": "notes",
-        "project": "project-uuid", "meeting": "lecture-01",
-    }
+    assert captured["text"] == "graph theory notes"
+    assert captured["title"] == "notes"
+    assert captured["project"] == "project-uuid"
+    assert captured["meeting"] == "lecture-01"
+    assert captured["stored"] == ("material-123", ["episode-doc"])
 
 
 def test_api_graph_and_ask_use_current_project(monkeypatch):
@@ -235,16 +254,30 @@ def test_api_ask_stream_post_uses_graphiti_question(monkeypatch):
     assert response.status_code == 200
     assert captured == {"project": "project-uuid", "question": "그럼 제약은?", "k": 6}
 
-def test_delete_source_is_blocked_until_graphiti_supports_session_delete(monkeypatch):
-    monkeypatch.setattr(api_main, "_owned_source_record", lambda user, source: {
-        "id": source,
+def test_delete_source_removes_owned_graphiti_episodes(monkeypatch):
+    source = {
+        "id": "recording-123",
         "project_id": "project-uuid",
         "recording_id": "recording-123",
         "kind": "audio",
         "original_name": "lecture.webm",
-        "source_payload": {"graphMeetingId": "meeting-123"},
-    })
+        "source_payload": {"graphEpisodeIds": ["episode-1", "episode-2"]},
+    }
+    deleted = []
+
+    class _Graphiti:
+        def find_episode_ids(self, project, **kwargs):
+            return []
+
+        def delete_episode(self, episode_id):
+            deleted.append(episode_id)
+            return {"success": True}
+
+    monkeypatch.setattr(api_main, "_owned_source_record", lambda user, source_id: source)
+    monkeypatch.setattr(api_main, "_owned_source_bundle_records", lambda user, record: [record])
+    monkeypatch.setattr(api_main, "_gsvx_client", lambda: _Graphiti())
     response = TestClient(app).delete("/api/source-graph", params={"source_id": "recording-123"})
 
-    assert response.status_code == 501
-    assert "Graphiti" in response.json()["detail"]
+    assert response.status_code == 200
+    assert response.json()["episodes_deleted"] == 2
+    assert set(deleted) == {"episode-1", "episode-2"}
