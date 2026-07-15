@@ -16,10 +16,56 @@
 ## 소유 스키마
 없음 — `stt/`, `chunking/`, `graphrag/`가 소유한 3개 스키마를 소비해 조립하는 통합 계층.
 
-## 구조
-- `api/` — 외부(및 `frontend/`)에 노출하는 API 서버 (STT 전사 + gsvx 릴레이)
-- `pipeline.py` — E2E 오케스트레이션 (입력 파일 → 청킹 → 자체 Neo4j `GraphStore` 적재)
-- `gsvx_connector.py` — STT 산출물·회의자료 → gsvx(Graphiti) 그래프 엔진 커넥터
+## 구조 — 파일별 역할
+
+### `api/main.py` — FastAPI 서버 (프론트가 부르는 입구)
+
+| 엔드포인트 | 입력 | 하는 일 |
+|---|---|---|
+| `GET /api/health` | — | 헬스체크 |
+| `POST /api/stt/transcribe` | multipart: `audio` + `materials[]` (+Supabase JWT) | CLOVA 전사 → 화자 라벨링 → (자료+키 있으면) `refine_transcript` 정제 → **중간포맷 JSON 반환** |
+| `POST /ingest-stt` | 중간포맷 JSON body | 검증 후 gsvx로 릴레이 (아래 표) |
+| `POST /ingest-doc` | multipart: `file` 1개 | 텍스트 추출 후 gsvx로 릴레이 (아래 표) |
+
+파일 파싱 헬퍼(`_extract_material_text` 등)와 stt 모듈 경량 로더(`_load_stt_module` —
+`backend/stt/__init__.py`의 무거운 의존성을 건너뛰고 서브모듈만 로드)도 여기 있다.
+
+### `api/auth.py` — Supabase Auth JWT 검증
+`require_user` 의존성: `Authorization: Bearer <JWT>`를 Supabase JWKS로 서명 검증.
+전사 엔드포인트에만 걸려 있다 (gsvx 릴레이는 gsvx 자체의 X-API-Key가 게이트).
+
+### `pipeline.py` — 자체 GraphStore(backend/graphrag) 적재 경로
+- `extract_text(path)` — pdf/pptx/docx/md/txt → 평문 (PDF는 텍스트 전용, 비전 LLM 없음)
+- `chunk_transcript(im)` / `chunk_document(text, doc_id)` — 화자 전환·길이 / 문단 기준 청킹
+- `ingest_files(paths, ...)` — 입력 파일들 → 청크 → `GraphStore.load_intermediate/load_chunks`
+  (graphrag Baseline용. gsvx와는 **별개의 병렬 시스템** — 아래 참고)
+
+### `gsvx_connector.py` — gsvx(Graphiti) 커넥터
+- `transcript_to_text(im)` — 중간포맷 segments → `"화자: 발화"` 줄들 (순서 보존)
+- `transcript_title(im)` — 세션 제목 생성 (예: `"2026-07-15 회의 전사 (M01)"`)
+- `split_for_ingest(text)` — 48,000자 이내면 그대로 1파트. 초과 시에만 문단 → 줄 경계
+  순으로 분할 + 파트 간 overlap (gsvx 하드 캡 50,000자/413 대응)
+- `GsvxClient` — gsvx HTTP 클라이언트
+  - `.ingest_text(text, title, project)` — `POST /ingest-text` 1회 호출 (원시 계약)
+  - `.ingest_transcript(im, project)` — 중간포맷 → 변환·분할 → 적재
+  - `.ingest_document(path, project)` / `.ingest_document_text(text, title, project)` — 자료 → 적재
+- `GsvxError(status_code, detail)` — gsvx 오류 (연결 실패면 `status_code=None`)
+- CLI: `python -m backend.integration.gsvx_connector 파일... --project P01`
+
+### 릴레이 엔드포인트 계약 (프론트 App.tsx가 쓰는 형태 그대로)
+
+| | `POST /ingest-stt` | `POST /ingest-doc` |
+|---|---|---|
+| **바디** | 중간포맷 JSON 통째로 | multipart `file` (pdf/pptx/docx/md/txt) |
+| **헤더** | `X-Project-Id`(→ gsvx project), `X-API-Key`(→ gsvx로 전달, 없으면 서버 환경변수) | 동일 |
+| **성공 200** | `{chunks_ingested, concepts_total, concepts_new, relations_new, sessions}` | 동일 |
+| **입력 오류** | `400` — 스키마 위반 필드를 detail로 (예: `missing key: source`) | `415` — 텍스트 추출 실패/미지원 형식 |
+| **gsvx 오류** | gsvx의 4xx를 그대로 전파: `401`(키), `413`(50,000자 초과), `429`(rate limit) | 동일 |
+| **gsvx 다운** | `502` + `{"detail": "gsvx에 연결하지 못했습니다 (...)"}` | 동일 |
+
+각 전사·자료는 **각각 별도의 gsvx 세션(에피소드)**으로 들어간다. 세션 간 연결은
+Graphiti가 개념 층위에서 자동으로 만든다 — 같은 project(group_id) 안에서 전사와
+자료가 같은 개념을 언급하면 동일 Entity 노드로 병합되어 그래프에서 이어진다.
 
 ## gsvx(Graphiti) 연결 — STT 출력이 그래프가 되기까지
 
