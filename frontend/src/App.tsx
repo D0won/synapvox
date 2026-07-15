@@ -75,6 +75,7 @@ type AuthUser = {
 
 const PROJECTS_STORAGE_KEY = 'synapvox-projects';
 const WORKSPACES_STORAGE_KEY = 'synapvox-project-workspaces';
+const ACTIVE_PROJECT_STORAGE_KEY = 'synapvox-active-project';
 const SUPABASE_ADMIN_EMAIL = 'root@synapvox.local';
 const scopedStorageKey = (baseKey: string, userId: string | null) => `${baseKey}:${userId ?? 'guest'}`;
 
@@ -299,6 +300,7 @@ function App() {
   const recordingMediaFileInputRef = useRef<HTMLInputElement | null>(null);
   const projectMaterialFilesRef = useRef<Record<string, ProjectMaterialFile[]>>({});
   const shouldSeedDemoRecordingRef = useRef(window.location.search.includes('demoRecording'));
+  const sessionUserIdRef = useRef<string | null | undefined>(undefined);
 
   const activeProject = activeProjectIndex === null ? null : projects[activeProjectIndex];
   const activeProjectId = activeProject?.id ?? null;
@@ -523,6 +525,21 @@ function App() {
     }
   }, [projects, storageUserId]);
 
+  useEffect(() => {
+    if (storageUserId === null) return;
+    const key = scopedStorageKey(ACTIVE_PROJECT_STORAGE_KEY, storageUserId);
+    if (activeProjectId === null) {
+      window.localStorage.removeItem(key);
+      return;
+    }
+    window.localStorage.setItem(key, activeProjectId);
+    window.history.replaceState(
+      { view: 'project', projectIndex: activeProjectIndex, projectId: activeProjectId },
+      '',
+      window.location.pathname,
+    );
+  }, [activeProjectId, activeProjectIndex, storageUserId]);
+
   // 프로젝트 전환 시: 그래프를 해당 프로젝트 네임스페이스로 다시 불러오고,
   // 소스 카드·전사 목록도 프로젝트별로 분리 보관/복원한다(이전 프로젝트 데이터가 새 프로젝트에 안 섞이게).
   const sourceItemsRef = useRef(sourceItems);
@@ -544,15 +561,22 @@ function App() {
     }
   }, [storageUserId]);
 
-  const switchProjectStorage = (userId: string | null) => {
-    setProjects(userId === null ? [] : loadStoredProjects(userId));
+  const switchProjectStorage = (userId: string | null, restoreActiveProject = true) => {
+    const nextProjects = userId === null ? [] : loadStoredProjects(userId);
+    const storedActiveProjectId = userId === null || !restoreActiveProject
+      ? null
+      : window.localStorage.getItem(scopedStorageKey(ACTIVE_PROJECT_STORAGE_KEY, userId));
+    const restoredProjectIndex = storedActiveProjectId === null
+      ? -1
+      : nextProjects.findIndex((project) => project.id === storedActiveProjectId && !project.trashed);
+    setProjects(nextProjects);
     projectWorkspacesRef.current = userId === null ? {} : loadStoredWorkspaces(userId);
     projectMaterialFilesRef.current = {};
     prevProjectIdRef.current = null;
     setSourceItems([]);
     setTranscriptsBySourceId({});
     setSelectedSource(null);
-    setActiveProjectIndex(null);
+    setActiveProjectIndex(restoredProjectIndex >= 0 ? restoredProjectIndex : null);
     setHomeSection('노트북');
     setStatusFilter('전체');
     setProjectQuery('');
@@ -569,10 +593,15 @@ function App() {
 
     const syncSession = (session: Session | null) => {
       const user = authUserFromSession(session);
+      const nextUserId = user?.id ?? null;
+      const userChanged = sessionUserIdRef.current !== nextUserId;
       setIsLoggedIn(user !== null);
       setCurrentUser(user);
       setIsAdminOpen(user?.role === 'admin');
-      switchProjectStorage(user?.id ?? null);
+      if (userChanged) {
+        sessionUserIdRef.current = nextUserId;
+        switchProjectStorage(nextUserId, user?.role !== 'admin');
+      }
       setIsAuthReady(true);
     };
 
@@ -787,6 +816,7 @@ function App() {
 
   const logout = () => {
     void supabase?.auth.signOut();
+    sessionUserIdRef.current = null;
     setIsLoggedIn(false);
     setCurrentUser(null);
     switchProjectStorage(null);
