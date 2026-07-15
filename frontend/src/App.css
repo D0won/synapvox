@@ -3694,8 +3694,14 @@ h3 {
 }
 
 .studio-graph {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  display: block;
+}
+
+.studio-graph > .svx-graphmodule {
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
 }
 
 .studio-panel-head {

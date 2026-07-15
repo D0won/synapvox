@@ -2379,7 +2379,7 @@ function App() {
               </aside>
 
               <section className="studio-graph">
-                <GraphModule project={activeProjectId} />
+                <GraphModule project={activeProjectId} projectName={activeProject.name} />
               </section>
 
               <aside className="studio-chat">
