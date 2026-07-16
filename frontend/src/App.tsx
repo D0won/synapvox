@@ -1247,7 +1247,7 @@ function App() {
     setIsTranscriptEditing((value) => !value);
   };
 
-  const removeSourceItem = async (sourceId: string) => {
+  const removeSourceItem = async (sourceId: string, persist = true) => {
     const targetSource = sourceItems.find((source) => source.id === sourceId);
     const recordingBundleId = targetSource?.category === '녹음본'
       ? targetSource.recordingId ?? targetSource.id
@@ -1256,7 +1256,7 @@ function App() {
       ? sourceItems.filter((source) => source.id === sourceId)
       : sourceItems.filter((source) => source.id === sourceId || source.recordingId === recordingBundleId);
     const removedSourceIds = new Set(removedSources.map((source) => source.id));
-    if (supabase !== null && targetSource?.storagePath !== undefined) {
+    if (persist && supabase !== null && targetSource?.storagePath !== undefined) {
       await deleteProjectSource(
         supabase,
         sourceId,
@@ -1309,23 +1309,41 @@ function App() {
     setSourceDeletionState('deleting');
     setSourceDeletionError(null);
     try {
-      if (supabase !== null && pendingSourceDeletion.storagePath === undefined) {
-        throw new Error('소스 저장이 끝난 뒤 다시 시도해주세요.');
+      if (activeProjectId === null) throw new Error('프로젝트를 찾지 못했습니다.');
+      const params = new URLSearchParams({ project_id: activeProjectId });
+      if (pendingSourceDeletion.recordingId) {
+        params.set('recording_id', pendingSourceDeletion.recordingId);
       }
-      if (pendingSourceDeletion.storagePath !== undefined) {
-        const response = await fetch(
-          `/api/source-graph?source_id=${encodeURIComponent(pendingSourceDeletion.id)}`,
-          {
-            method: 'DELETE',
-            headers: await apiHeaders(activeProjectId),
-          },
-        );
-        if (!response.ok) {
-          const errorBody = await response.json().catch(() => null) as { detail?: string } | null;
-          throw new Error(errorBody?.detail ?? '그래프 데이터 삭제에 실패했습니다.');
+      if (pendingSourceDeletion.graphMeetingId) {
+        params.set('meeting_id', pendingSourceDeletion.graphMeetingId);
+      }
+      params.set('title', pendingSourceDeletion.title);
+      const response = await fetch(
+        `/api/sources/${encodeURIComponent(pendingSourceDeletion.id)}?${params.toString()}`,
+        {
+          method: 'DELETE',
+          headers: await apiHeaders(activeProjectId),
+        },
+      );
+      const body = await response.json().catch(() => null) as {
+        detail?: string;
+        storage_paths?: string[];
+        warnings?: string[];
+      } | null;
+      if (!response.ok) {
+        throw new Error(body?.detail ?? '소스 데이터 삭제에 실패했습니다.');
+      }
+      if (supabase !== null && (body?.storage_paths?.length ?? 0) > 0) {
+        try {
+          await removeStoredProjectFiles(supabase, body?.storage_paths ?? []);
+        } catch (error) {
+          console.error('삭제된 소스의 Storage 파일 정리 실패:', error);
         }
       }
-      await removeSourceItem(pendingSourceDeletion.id);
+      if ((body?.warnings?.length ?? 0) > 0) {
+        console.warn('소스 일부 저장소 정리 경고:', body?.warnings);
+      }
+      await removeSourceItem(pendingSourceDeletion.id, false);
       setPendingSourceDeletion(null);
       setSourceDeletionState('idle');
       setGraphReloadKey((value) => value + 1);
@@ -1964,7 +1982,10 @@ function App() {
       const body = await response.json().catch(() => null) as { detail?: string } | null;
       throw new Error(body?.detail ?? '프로젝트를 영구 삭제하지 못했습니다.');
     }
-    const body = await response.json() as { storage_paths?: string[] };
+    const body = await response.json() as { storage_paths?: string[]; warnings?: string[] };
+    if ((body.warnings?.length ?? 0) > 0) {
+      console.warn('프로젝트 일부 저장소 정리 경고:', body.warnings);
+    }
     if (supabase !== null) {
       try {
         await removeStoredProjectFiles(supabase, body.storage_paths ?? []);

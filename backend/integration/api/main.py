@@ -548,6 +548,55 @@ def _delete_project_rows(user_id: str, project_id: str) -> list[str]:
     return storage_paths
 
 
+def _delete_source_rows(
+    user_id: str,
+    source_id: str,
+    recording_id: str | None = None,
+) -> dict:
+    """Delete an owned source bundle even when some related rows are already gone."""
+    import psycopg2
+
+    with psycopg2.connect(os.environ["SUPABASE_DB_URL"]) as connection:
+        with connection.cursor() as cursor:
+            if recording_id:
+                cursor.execute(
+                    """SELECT storage_path FROM public.project_sources
+                       WHERE owner_id = %s AND recording_id = %s""",
+                    (user_id, recording_id),
+                )
+                storage_paths = [str(row[0]) for row in cursor.fetchall()]
+                cursor.execute(
+                    """DELETE FROM public.recording_transcripts
+                       WHERE owner_id = %s AND recording_id = %s""",
+                    (user_id, recording_id),
+                )
+                transcripts_deleted = cursor.rowcount
+                cursor.execute(
+                    """DELETE FROM public.project_sources
+                       WHERE owner_id = %s AND recording_id = %s""",
+                    (user_id, recording_id),
+                )
+            else:
+                cursor.execute(
+                    """SELECT storage_path FROM public.project_sources
+                       WHERE owner_id = %s AND id = %s""",
+                    (user_id, source_id),
+                )
+                storage_paths = [str(row[0]) for row in cursor.fetchall()]
+                transcripts_deleted = 0
+                cursor.execute(
+                    """DELETE FROM public.project_sources
+                       WHERE owner_id = %s AND id = %s""",
+                    (user_id, source_id),
+                )
+            sources_deleted = cursor.rowcount
+    return {
+        "storage_paths": storage_paths,
+        "sources_deleted": sources_deleted,
+        "transcripts_deleted": transcripts_deleted,
+    }
+
+
 @app.patch("/api/projects/{project_id}/trash")
 async def set_project_trash_state(
     project_id: str,
@@ -568,21 +617,47 @@ async def permanently_delete_project(
 ) -> dict:
     user_id = str(user.get("sub") or "")
     project = await run_in_threadpool(_owned_project_record, user_id, project_id)
-    if project is None:
-        raise HTTPException(status_code=404, detail="project not found")
-    if project["trashed_at"] is None:
+    if project is not None and project["trashed_at"] is None:
         raise HTTPException(status_code=409, detail="휴지통으로 이동한 프로젝트만 영구 삭제할 수 있습니다.")
 
-    try:
-        await run_in_threadpool(_gsvx_client().reset, project_id)
-    except Exception as exc:
-        raise _graphiti_error(exc) from exc
+    graph_result, database_result = await asyncio.gather(
+        run_in_threadpool(_gsvx_client().reset, project_id),
+        run_in_threadpool(_delete_project_rows, user_id, project_id),
+        return_exceptions=True,
+    )
+    database_missing = isinstance(database_result, LookupError)
+    graph_error = graph_result if isinstance(graph_result, Exception) else None
+    database_error = (
+        database_result
+        if isinstance(database_result, Exception) and not database_missing
+        else None
+    )
+    graph_deleted = graph_error is None
+    database_deleted = isinstance(database_result, list)
+    if not graph_deleted and not database_deleted:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"프로젝트 삭제에 실패했습니다. Graph DB: {graph_error}; "
+                f"Supabase: {database_error}"
+            ),
+        )
 
-    try:
-        storage_paths = await run_in_threadpool(_delete_project_rows, user_id, project_id)
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail="project not found") from exc
-    return {"id": project_id, "deleted": True, "storage_paths": storage_paths}
+    return {
+        "id": project_id,
+        "deleted": True,
+        "storage_paths": database_result if isinstance(database_result, list) else [],
+        "graph_deleted": graph_deleted,
+        "database_deleted": database_deleted,
+        "warnings": [
+            message
+            for message in (
+                f"Graph DB 정리 실패: {graph_error}" if graph_error is not None else None,
+                f"Supabase 정리 실패: {database_error}" if database_error is not None else None,
+            )
+            if message is not None
+        ],
+    }
 
 
 @app.post("/ingest-stt", include_in_schema=False)
@@ -752,6 +827,120 @@ async def delete_source_graph(
         "source_id": source_id,
         "episodes_deleted": int(delete_result.get("episodes_deleted") or 0),
         "orphan_entities_deleted": int(delete_result.get("entities_deleted") or 0),
+    }
+
+
+@app.delete("/api/sources/{source_id}")
+async def delete_source_everywhere(
+    source_id: str,
+    project_id: str = Query(..., min_length=1),
+    recording_id: str | None = Query(None),
+    meeting_id: str | None = Query(None),
+    title: str | None = Query(None),
+    user: dict = Depends(require_user),
+) -> dict:
+    """Delete a source from Supabase and Graphiti independently.
+
+    The hints let Graphiti leftovers be removed even if the Supabase source row
+    was already deleted by an earlier partial attempt.
+    """
+    user_id = str(user.get("sub") or "")
+    source = await run_in_threadpool(_owned_source_record, user_id, source_id)
+    if source is not None and str(source["project_id"]) != project_id:
+        raise HTTPException(status_code=404, detail="source not found")
+
+    records = (
+        await run_in_threadpool(_owned_source_bundle_records, user_id, source)
+        if source is not None
+        else []
+    )
+    effective_recording_id = (
+        str(source.get("recording_id"))
+        if source is not None and source.get("recording_id")
+        else recording_id
+    )
+    episode_ids: set[str] = set()
+    meeting_ids: set[str] = {meeting_id} if meeting_id else set()
+    titles: set[str] = {Path(title).stem} if title else set()
+
+    for record in records:
+        payload = record.get("source_payload") or {}
+        stored_episode_ids: list[str] = []
+        if isinstance(payload, dict):
+            stored_episode_ids = [
+                str(value) for value in payload.get("graphEpisodeIds", []) if value
+            ]
+            episode_ids.update(stored_episode_ids)
+            graph_meeting_id = payload.get("graphMeetingId")
+            if not stored_episode_ids and isinstance(graph_meeting_id, str) and graph_meeting_id:
+                meeting_ids.add(graph_meeting_id)
+        if not stored_episode_ids and record.get("kind") == "document":
+            titles.add(Path(str(record.get("original_name") or "자료")).stem)
+
+    client = _gsvx_client()
+    lookup_tasks = [
+        run_in_threadpool(client.find_episode_ids, project_id, meeting_id=value)
+        for value in meeting_ids
+    ]
+    lookup_tasks.extend(
+        run_in_threadpool(client.find_episode_ids, project_id, title=value)
+        for value in titles
+    )
+    graph_lookup_error: Exception | None = None
+    if lookup_tasks:
+        lookup_results = await asyncio.gather(*lookup_tasks, return_exceptions=True)
+        for result in lookup_results:
+            if isinstance(result, Exception):
+                graph_lookup_error = result
+            else:
+                episode_ids.update(result)
+
+    graph_task = run_in_threadpool(client.delete_episodes, sorted(episode_ids))
+    database_task = run_in_threadpool(
+        _delete_source_rows,
+        user_id,
+        source_id,
+        effective_recording_id,
+    )
+    graph_result, database_result = await asyncio.gather(
+        graph_task,
+        database_task,
+        return_exceptions=True,
+    )
+    graph_error = graph_result if isinstance(graph_result, Exception) else graph_lookup_error
+    database_error = database_result if isinstance(database_result, Exception) else None
+    database_data = database_result if isinstance(database_result, dict) else {}
+    database_deleted = (
+        source is not None
+        or int(database_data.get("sources_deleted") or 0) > 0
+        or int(database_data.get("transcripts_deleted") or 0) > 0
+    ) and database_error is None
+    graph_deleted = graph_error is None
+    if not graph_deleted and not database_deleted:
+        raise HTTPException(
+            status_code=502,
+            detail=f"소스 삭제에 실패했습니다. Graph DB: {graph_error}; Supabase: {database_error}",
+        )
+
+    graph_data = graph_result if isinstance(graph_result, dict) else {}
+    return {
+        "source_id": source_id,
+        "deleted": True,
+        "storage_paths": database_data.get("storage_paths", []),
+        "sources_deleted": int(database_data.get("sources_deleted") or 0),
+        "transcripts_deleted": int(database_data.get("transcripts_deleted") or 0),
+        "episodes_deleted": int(graph_data.get("episodes_deleted") or 0),
+        "orphan_entities_deleted": int(graph_data.get("entities_deleted") or 0),
+        "graph_deleted": graph_deleted,
+        "database_deleted": database_deleted,
+        "warnings": [
+            message
+            for message in (
+                f"Graph DB 정리 실패: {graph_error}" if graph_error is not None else None,
+                f"Supabase 정리 실패: {database_error}" if database_error is not None else None,
+            )
+            if message is not None
+        ],
     }
 
 
