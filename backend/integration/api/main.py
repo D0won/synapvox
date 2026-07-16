@@ -486,6 +486,7 @@ class AskStreamRequest(BaseModel):
     project: str = Field(min_length=1)
     q: str = Field(min_length=1, max_length=4000)
     k: int = Field(default=6, ge=1, le=12)
+    meeting_id: str | None = Field(default=None)
     history: list[ChatHistoryMessage] = Field(default_factory=list, max_length=30)
 
 
@@ -758,10 +759,11 @@ async def ask_project_graph(
     project: str = Query(..., min_length=1),
     q: str = Query(..., min_length=1),
     k: int = Query(6, ge=1, le=12),
+    meeting_id: str | None = Query(None),
     user: dict = Depends(require_user),
 ) -> dict:
     try:
-        return await run_in_threadpool(_gsvx_client().ask, project, q, k)
+        return await run_in_threadpool(_gsvx_client().ask, project, q, k, meeting_id)
     except Exception as exc:
         raise _graphiti_error(exc) from exc
 
@@ -770,10 +772,10 @@ def _ndjson_event(event_type: str, **payload) -> str:
     return json.dumps({"type": event_type, **payload}, ensure_ascii=False) + "\n"
 
 
-def _ask_stream_events(project: str, q: str, k: int):
+def _ask_stream_events(project: str, q: str, k: int, meeting_id: str | None = None):
     """Adapt Graphiti's complete answer response to the frontend NDJSON contract."""
     try:
-        result = _gsvx_client().ask(project, q, k)
+        result = _gsvx_client().ask(project, q, k, meeting_id)
         answer = str(result.get("answer") or "")
         for start in range(0, len(answer), 48):
             yield _ndjson_event("delta", text=answer[start:start + 48])
@@ -789,10 +791,11 @@ def ask_project_graph_stream(
     project: str = Query(..., min_length=1),
     q: str = Query(..., min_length=1),
     k: int = Query(6, ge=1, le=12),
+    meeting_id: str | None = Query(None),
     user: dict = Depends(require_user),
 ) -> StreamingResponse:
     return StreamingResponse(
-        _ask_stream_events(project, q, k),
+        _ask_stream_events(project, q, k, meeting_id),
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -804,7 +807,7 @@ def ask_project_graph_stream_with_history(
     user: dict = Depends(require_user),
 ) -> StreamingResponse:
     return StreamingResponse(
-        _ask_stream_events(request.project, request.q, request.k),
+        _ask_stream_events(request.project, request.q, request.k, request.meeting_id),
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

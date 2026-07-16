@@ -187,7 +187,7 @@ def test_api_graph_and_ask_use_current_project(monkeypatch):
             "nodes": [{"id": project, "type": "session", "label": "강의", "meta": {}}], "edges": [],
             }
 
-        def ask(self, project, question, k):
+        def ask(self, project, question, k, meeting_id=None):
             return {"answer": question, "hits": [], "expansion": {"nodes": [], "edges": []}}
 
     monkeypatch.setattr(api_main, "_gsvx_client", lambda: _Graphiti())
@@ -204,7 +204,7 @@ def test_api_graph_and_ask_use_current_project(monkeypatch):
 
 def test_api_ask_stream_emits_deltas_then_focus_graph(monkeypatch):
     class _Graphiti:
-        def ask(self, project, question, k):
+        def ask(self, project, question, k, meeting_id=None):
             return {
                 "answer": "미분은 변화율입니다.",
                 "hits": [],
@@ -233,8 +233,8 @@ def test_api_ask_stream_post_uses_graphiti_question(monkeypatch):
     captured = {}
 
     class _Graphiti:
-        def ask(self, project, question, k):
-            captured.update(project=project, question=question, k=k)
+        def ask(self, project, question, k, meeting_id=None):
+            captured.update(project=project, question=question, k=k, meeting_id=meeting_id)
             return {"answer": "이전 대화를 이어서 답변", "hits": [], "expansion": {"nodes": [], "edges": []}}
 
     monkeypatch.setattr(api_main, "_gsvx_client", lambda: _Graphiti())
@@ -252,7 +252,44 @@ def test_api_ask_stream_post_uses_graphiti_question(monkeypatch):
     )
 
     assert response.status_code == 200
-    assert captured == {"project": "project-uuid", "question": "그럼 제약은?", "k": 6}
+    assert captured == {"project": "project-uuid", "question": "그럼 제약은?", "k": 6, "meeting_id": None}
+
+
+def test_api_ask_stream_post_threads_meeting_id(monkeypatch):
+    captured = {}
+
+    class _Graphiti:
+        def ask(self, project, question, k, meeting_id=None):
+            captured["meeting_id"] = meeting_id
+            return {"answer": "답변", "hits": [], "expansion": {"nodes": [], "edges": []}}
+
+    monkeypatch.setattr(api_main, "_gsvx_client", lambda: _Graphiti())
+
+    response = TestClient(app).post(
+        "/api/ask-stream",
+        json={"project": "project-uuid", "q": "이 회의에서는?", "meeting_id": "M07"},
+    )
+
+    assert response.status_code == 200
+    assert captured["meeting_id"] == "M07"
+
+
+def test_api_ask_threads_meeting_id(monkeypatch):
+    captured = {}
+
+    class _Graphiti:
+        def ask(self, project, question, k, meeting_id=None):
+            captured["meeting_id"] = meeting_id
+            return {"answer": question, "hits": [], "expansion": {"nodes": [], "edges": []}}
+
+    monkeypatch.setattr(api_main, "_gsvx_client", lambda: _Graphiti())
+
+    response = TestClient(app).get(
+        "/api/ask", params={"project": "project-uuid", "q": "질문", "k": 4, "meeting_id": "M07"}
+    )
+
+    assert response.status_code == 200
+    assert captured["meeting_id"] == "M07"
 
 def test_delete_source_removes_owned_graphiti_episodes(monkeypatch):
     source = {
