@@ -139,13 +139,39 @@ async def add_messages(request: AddMessagesRequest) -> dict:
     }
 
 
+class SearchQueryWithMeeting(SearchQuery):
+    """SearchQuery + meeting_id(선택). 공식 Graphiti search()는 group_id 단위로만 dedup을
+    하므로(node_operations.py의 node_similarity_search가 [node.group_id]로만 후보를 찾음),
+    미팅마다 group_id를 나누면 같은 인물/개념이 회의마다 중복 노드로 생기게 된다. 그래서 group_id는
+    프로젝트 단위로 유지하고, 검색 결과를 에피소드 제목으로 사후 필터링하는 방식을 쓴다."""
+
+    meeting_id: str | None = Field(default=None)
+
+
+async def _episode_ids_for_meeting(episode_ids: set[str], meeting_id: str) -> set[str]:
+    """주어진 에피소드 uuid 중 이 미팅 것만 골라낸다. 에피소드 제목은 gsvx_connector의
+    transcript_title()/document_title()이 "... (M07)" 형태로 meeting_id를 끝에 붙여
+    저장해두므로, 그 접미사로 매칭한다."""
+    if not episode_ids:
+        return set()
+    result = await _client().driver.execute_query(
+        "MATCH (e:Episodic) WHERE e.uuid IN $ids AND e.name ENDS WITH $suffix RETURN e.uuid AS uuid",
+        ids=list(episode_ids), suffix=f"({meeting_id})",
+    )
+    return {record["uuid"] for record in result.records}
+
+
 @app.post("/search")
-async def search(query: SearchQuery) -> dict:
+async def search(query: SearchQueryWithMeeting) -> dict:
     edges = await _client().search(
         group_ids=query.group_ids,
         query=query.query,
         num_results=query.max_facts,
     )
+    if query.meeting_id:
+        episode_ids = {episode_id for edge in edges for episode_id in edge.episodes}
+        matching = await _episode_ids_for_meeting(episode_ids, query.meeting_id)
+        edges = [edge for edge in edges if matching.intersection(edge.episodes)]
     return {"facts": [get_fact_result_from_edge(edge).model_dump(mode="json") for edge in edges]}
 
 

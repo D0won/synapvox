@@ -259,3 +259,30 @@ def test_ingest_ask_and_reset_use_official_graphiti_contract(monkeypatch):
     assert calls[2] == (
         "DELETE", "https://graphiti.example/group/project-uuid", None, None,
     )
+
+
+def test_ask_includes_meeting_id_in_search_body_when_given(monkeypatch):
+    calls = []
+
+    class _FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"facts": []}
+
+    def fake_request(method, url, **kwargs):
+        calls.append(kwargs.get("json"))
+        return _FakeResponse()
+
+    monkeypatch.setattr(gsvx_connector.requests, "request", fake_request)
+    client = GsvxClient(base_url="https://graphiti.example")
+    monkeypatch.setattr(client, "_graph_counts", lambda project: {"concepts": 0, "relations": 0})
+    monkeypatch.setattr(client, "_expansion_for_facts", lambda project, facts: {"nodes": [], "edges": []})
+    monkeypatch.setattr(client, "_answer_from_facts", lambda question, facts: "근거 없음")
+
+    client.ask("project-uuid", "이 회의에서 결정된 건?", 6, meeting_id="M07")
+    assert calls[0] == {"group_ids": ["project-uuid"], "query": "이 회의에서 결정된 건?", "max_facts": 6,
+                        "meeting_id": "M07"}
+
+    client.ask("project-uuid", "질문", 6)  # meeting_id 생략 시 기존과 동일(필드 자체가 없음)
+    assert "meeting_id" not in calls[1]

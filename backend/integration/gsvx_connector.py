@@ -228,10 +228,15 @@ class GsvxClient:
                 ).data()
         return {"nodes": nodes, "edges": edges}
 
-    def ask(self, project: str, question: str, k: int = 6) -> dict:
-        search = self._request("POST", "/search", body={
-            "group_ids": [project], "query": question, "max_facts": k,
-        })
+    def ask(self, project: str, question: str, k: int = 6, meeting_id: str | None = None) -> dict:
+        """meeting_id(선택)를 주면 graphiti_host의 /search가 이 미팅의 에피소드에서 나온
+        사실로만 결과를 좁힌다 — group_id는 그대로 프로젝트 단위라 세션 간 엔티티 중복
+        제거(dedup)는 안 깨진다(dedup은 group_id 스코프라서, 미팅별 group_id로 쪼개면
+        같은 인물/개념이 회의마다 중복 생성됨 — 그래서 사후 필터링 방식을 씀)."""
+        body = {"group_ids": [project], "query": question, "max_facts": k}
+        if meeting_id:
+            body["meeting_id"] = meeting_id
+        search = self._request("POST", "/search", body=body)
         facts = search.get("facts") if isinstance(search.get("facts"), list) else []
         expansion = self._expansion_for_facts(project, facts)
         return {
