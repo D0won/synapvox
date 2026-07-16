@@ -315,20 +315,20 @@ export const GraphView = forwardRef<GraphViewHandle, GraphViewProps>(function Gr
       link?.distance?.((l) => {
         const s = typeof l.source === 'object' ? l.source.type : undefined
         const t = typeof l.target === 'object' ? l.target.type : undefined
-        if (s === 'main' || t === 'main') return 60
+        if (s === 'main' || t === 'main') return 54
         if (l.relClass === 'mentions') return 40
         return 33
       })
       link?.strength?.((l) => {
         const s = typeof l.source === 'object' ? l.source.type : undefined
         const t = typeof l.target === 'object' ? l.target.type : undefined
-        if (s === 'main' || t === 'main') return 0.1
-        if (l.relClass === 'mentions') return 0.055
+        if (s === 'main' || t === 'main') return 0.18
+        if (l.relClass === 'mentions') return 0.07
         return 0.22
       })
       const charge = fg.d3Force('charge') as unknown as { strength?: (fn: (n: FNode) => number) => unknown } | undefined
       charge?.strength?.((n: FNode) => {
-        if (n.type === 'main') return -150
+        if (n.type === 'main') return -120
         if (n.type === 'session') return -65
         return -18 - Math.min(n.degree ?? 0, 8) * 4
       })
