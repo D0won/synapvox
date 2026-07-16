@@ -47,11 +47,14 @@ def test_transcript_to_text_rejects_broken_intermediate():
         transcript_to_text(broken)
 
 
-def test_transcript_title_reflects_mode():
-    assert transcript_title(_intermediate()) == "2026-07-15 회의 전사 (M01)"
-    lecture = _intermediate()
-    lecture["mode"] = "lecture"
-    assert "강의" in transcript_title(lecture)
+def test_transcript_title_uses_original_audio_filename():
+    assert transcript_title(_intermediate()) == "meeting.m4a"
+
+
+def test_transcript_title_falls_back_when_source_is_missing():
+    transcript = _intermediate()
+    transcript["source"] = ""
+    assert transcript_title(transcript) == "2026-07-15 회의 전사"
 
 
 def test_document_title_appends_meeting_id_when_given():

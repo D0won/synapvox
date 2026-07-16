@@ -61,8 +61,11 @@ def transcript_to_text(im: dict) -> str:
 
 def transcript_title(im: dict) -> str:
     """gsvx 세션(에피소드) 제목 — 그래프 뷰·타임라인에 그대로 표시된다."""
+    source_name = Path(str(im.get("source") or "")).name.strip()
+    if source_name:
+        return source_name
     mode = "강의" if im.get("mode") == "lecture" else "회의"
-    return f"{im['date']} {mode} 전사 ({im['meeting_id']})"
+    return f"{im['date']} {mode} 전사"
 
 
 def document_title(stem: str, meeting_id: str | None = None) -> str:
@@ -455,6 +458,7 @@ class GsvxClient:
             [chunk["text"] for chunk in chunks],
             transcript_title(im),
             project=project or im.get("project_id"),
+            source_description=f"meeting:{im['meeting_id']}",
         )
 
     def ingest_document(self, path: Path | str, project: str | None = None,
@@ -481,11 +485,21 @@ class GsvxClient:
             project=project,
         )
 
-    def _ingest_chunks(self, chunks: list[str], title: str,
-                       project: str | None = None) -> dict:
+    def _ingest_chunks(
+        self,
+        chunks: list[str],
+        title: str,
+        project: str | None = None,
+        source_description: str | None = None,
+    ) -> dict:
         if not chunks:
             raise ValueError("빈 텍스트는 그래프에 넣을 수 없습니다.")
-        result = self.ingest_texts(chunks, title, project=project)
+        result = self.ingest_texts(
+            chunks,
+            title,
+            project=project,
+            name=source_description,
+        )
         stats = result.get("stats", {})
         return {
             "chunks_ingested": len(chunks),

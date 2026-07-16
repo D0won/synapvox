@@ -164,14 +164,21 @@ class SearchQueryWithMeeting(SearchQuery):
 
 
 async def _episode_ids_for_meeting(episode_ids: set[str], meeting_id: str) -> set[str]:
-    """주어진 에피소드 uuid 중 이 미팅 것만 골라낸다. 에피소드 제목은 gsvx_connector의
-    transcript_title()/document_title()이 "... (M07)" 형태로 meeting_id를 끝에 붙여
-    저장해두므로, 그 접미사로 매칭한다."""
+    """주어진 에피소드 uuid 중 이 미팅 것만 골라낸다.
+
+    새 전사 데이터는 원본 파일명을 화면 제목으로 쓰고 source_description에 meeting_id를
+    저장한다. 기존 데이터와 녹음 연결 자료는 제목의 ``(meeting_id)`` 접미사도 지원한다.
+    """
     if not episode_ids:
         return set()
     result = await _client().driver.execute_query(
-        "MATCH (e:Episodic) WHERE e.uuid IN $ids AND e.name ENDS WITH $suffix RETURN e.uuid AS uuid",
-        ids=list(episode_ids), suffix=f"({meeting_id})",
+        """MATCH (e:Episodic)
+           WHERE e.uuid IN $ids
+             AND (e.source_description = $description OR e.name ENDS WITH $suffix)
+           RETURN e.uuid AS uuid""",
+        ids=list(episode_ids),
+        description=f"meeting:{meeting_id}",
+        suffix=f"({meeting_id})",
     )
     return {record["uuid"] for record in result.records}
 
