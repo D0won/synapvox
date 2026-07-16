@@ -72,7 +72,7 @@ export default function GraphModule({
   return (
     <div className="svx-graphmodule">
       <div className="svx-gm__controls">
-        <span className="svx-gm__scope-label">현재 프로젝트</span>
+        <span className="svx-gm__scope-label">그래프 뷰</span>
         <span className="svx-gm__count">
           개념 {meta.nodes}개 · 연결 {meta.edges}개
         </span>
