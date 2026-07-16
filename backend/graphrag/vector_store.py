@@ -60,13 +60,14 @@ class VectorStore:
             cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
             cur.execute(f"""
                 CREATE TABLE IF NOT EXISTS {self.table} (
-                    chunk_id TEXT PRIMARY KEY,
+                    chunk_id TEXT NOT NULL,
                     project_id TEXT NOT NULL,
                     meeting_id TEXT,
                     source_type TEXT NOT NULL DEFAULT 'unknown',
                     chunk_text TEXT NOT NULL,
                     embedding VECTOR NOT NULL,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    PRIMARY KEY (project_id, chunk_id)
                 );
             """)
             cur.execute(f"CREATE INDEX IF NOT EXISTS {self.table}_project_id_idx ON {self.table} (project_id);")
@@ -86,21 +87,25 @@ class VectorStore:
                 cur,
                 f"""INSERT INTO {self.table} (chunk_id, project_id, meeting_id, source_type, chunk_text, embedding)
                     VALUES %s
-                    ON CONFLICT (chunk_id) DO UPDATE SET
-                        project_id = EXCLUDED.project_id, meeting_id = EXCLUDED.meeting_id,
+                    ON CONFLICT (project_id, chunk_id) DO UPDATE SET
+                        meeting_id = EXCLUDED.meeting_id,
                         source_type = EXCLUDED.source_type, chunk_text = EXCLUDED.chunk_text,
                         embedding = EXCLUDED.embedding""",
                 rows,
             )
         self.conn.commit()
 
-    def query(self, project_id: str, text: str, k: int = 8, source_type: str | None = None):
+    def query(self, project_id: str, text: str, k: int = 8, source_type: str | None = None,
+              meeting_id: str | None = None):
         sql = (f"SELECT chunk_id, chunk_text, meeting_id, source_type, embedding <=> %s::vector AS distance "
                f"FROM {self.table} WHERE project_id = %s")
         params = [self.embed_fn(text), project_id]
         if source_type:
             sql += " AND source_type = %s"
             params.append(source_type)
+        if meeting_id:
+            sql += " AND meeting_id = %s"
+            params.append(meeting_id)
         sql += " ORDER BY distance LIMIT %s"
         params.append(k)
 

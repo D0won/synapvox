@@ -26,8 +26,8 @@ class HybridSearch:
                 pid=project_id, cid=chunk_id).single()
             return (rec["topics"] or [], rec["meeting_id"], rec["meeting_title"]) if rec else ([], None, None)
 
-    def search(self, project_id: str, query: str, k: int = 8) -> list[dict]:
-        hits = self.vec.query(project_id, query, k=k)
+    def search(self, project_id: str, query: str, k: int = 8, meeting_id: str | None = None) -> list[dict]:
+        hits = self.vec.query(project_id, query, k=k, meeting_id=meeting_id)
         enriched = []
         for h in hits:
             topics, mid, mtitle = self._expand(project_id, h["chunk_id"])

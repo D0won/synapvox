@@ -124,6 +124,12 @@ def test_hybrid_search_expands_and_reranks(loaded, driver):
     assert all(h["meeting_id"] for h in res)   # 회의 매핑
 
 
+def test_hybrid_search_meeting_id_scopes_to_one_meeting(loaded, driver):
+    gs, vs = loaded
+    res = HybridSearch(driver, vs).search(PID, "결제 관련 내용", meeting_id="M01")
+    assert res and all(h["chunk_id"] == "M01c1" for h in res)  # M02 청크 안 섞임
+
+
 def test_vector_store_project_isolation(vector_store):
     vs = vector_store
     vs.reset("P-A"); vs.reset("P-B")
@@ -132,6 +138,16 @@ def test_vector_store_project_isolation(vector_store):
     hits = vs.query("P-A", "결제", k=5)
     assert hits and all(h["chunk_id"] != "b1" for h in hits)  # 다른 프로젝트 누출 없음
     vs.reset("P-A"); vs.reset("P-B")
+
+
+def test_vector_store_meeting_id_filters_within_project(vector_store):
+    vs = vector_store
+    vs.reset("P-MEETING-FILTER")
+    vs.add_chunks("P-MEETING-FILTER", "M01", [{"chunk_id": "m01c1", "text": "결제 모듈 카드 간편결제"}])
+    vs.add_chunks("P-MEETING-FILTER", "M02", [{"chunk_id": "m02c1", "text": "결제 모듈 카드 간편결제"}])
+    hits = vs.query("P-MEETING-FILTER", "결제", k=5, meeting_id="M01")
+    assert hits and all(h["chunk_id"] != "m02c1" for h in hits)  # 같은 프로젝트 내 다른 미팅 누출 없음
+    vs.reset("P-MEETING-FILTER")
 
 
 def test_vector_store_upsert_overwrites_same_chunk_id(vector_store):
