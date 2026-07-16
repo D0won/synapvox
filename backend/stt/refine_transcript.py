@@ -4,8 +4,10 @@ import os
 from pathlib import Path
 
 from openai import OpenAI
+from langsmith import traceable
 
 from backend.graphrag import VectorStore
+from backend.observability import wrap_openai_client
 
 _MAX_RETRIES = 2
 DEFAULT_REFINEMENT_MODEL = "gpt-5-mini"
@@ -34,6 +36,7 @@ def _chunk_text(text: str, chunk_size: int = 300) -> list:
     return chunks
 
 
+@traceable(name="STT material retrieval", run_type="retriever")
 def retrieve_relevant_context(
     query_text: str,
     project_id: str,
@@ -113,6 +116,7 @@ def _parse_llm_output(raw_content: str, expected_ids: set) -> dict:
     return {s["id"]: s["text"] for s in data["segments"]}
 
 
+@traceable(name="Stage 2 transcript refinement", run_type="chain")
 def refine_transcript(
     data: dict,
     material_text: str = None,
@@ -121,7 +125,7 @@ def refine_transcript(
 ) -> dict:
     """Apply stage-2 refinement to a 중간 포맷 JSON object (source/mode/segments shape).
     Returns the same shape with segments[].text replaced by the corrected version."""
-    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    client = wrap_openai_client(OpenAI(api_key=os.environ["OPENAI_API_KEY"]))
     model = model or refinement_model()
     prompt = build_refinement_prompt(data["segments"], material_text, past_meeting_texts)
     expected_ids = {s["id"] for s in data["segments"]}

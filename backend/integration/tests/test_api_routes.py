@@ -233,8 +233,8 @@ def test_api_ask_stream_post_uses_graphiti_question(monkeypatch):
     captured = {}
 
     class _Graphiti:
-        def ask(self, project, question, k, meeting_id=None):
-            captured.update(project=project, question=question, k=k, meeting_id=meeting_id)
+        def ask(self, project, question, k, meeting_id=None, history=None):
+            captured.update(project=project, question=question, k=k, meeting_id=meeting_id, history=history)
             return {"answer": "이전 대화를 이어서 답변", "hits": [], "expansion": {"nodes": [], "edges": []}}
 
     monkeypatch.setattr(api_main, "_gsvx_client", lambda: _Graphiti())
@@ -252,7 +252,16 @@ def test_api_ask_stream_post_uses_graphiti_question(monkeypatch):
     )
 
     assert response.status_code == 200
-    assert captured == {"project": "project-uuid", "question": "그럼 제약은?", "k": 6, "meeting_id": None}
+    assert captured == {
+        "project": "project-uuid",
+        "question": "그럼 제약은?",
+        "k": 6,
+        "meeting_id": None,
+        "history": [
+            {"role": "user", "text": "KKT가 뭐야?"},
+            {"role": "assistant", "text": "최적화의 필요 조건입니다."},
+        ],
+    }
 
 
 def test_api_ask_stream_post_threads_meeting_id(monkeypatch):
@@ -304,11 +313,11 @@ def test_delete_source_removes_owned_graphiti_episodes(monkeypatch):
 
     class _Graphiti:
         def find_episode_ids(self, project, **kwargs):
-            return []
+            raise AssertionError("stored episode IDs must skip compatibility lookups")
 
-        def delete_episode(self, episode_id):
-            deleted.append(episode_id)
-            return {"success": True}
+        def delete_episodes(self, episode_ids):
+            deleted.extend(episode_ids)
+            return {"success": True, "episodes_deleted": 2, "entities_deleted": 3}
 
     monkeypatch.setattr(api_main, "_owned_source_record", lambda user, source_id: source)
     monkeypatch.setattr(api_main, "_owned_source_bundle_records", lambda user, record: [record])
@@ -317,4 +326,5 @@ def test_delete_source_removes_owned_graphiti_episodes(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["episodes_deleted"] == 2
+    assert response.json()["orphan_entities_deleted"] == 3
     assert set(deleted) == {"episode-1", "episode-2"}

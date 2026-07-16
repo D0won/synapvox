@@ -21,9 +21,10 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from dotenv import load_dotenv
+from langsmith import traceable
 from pydantic import BaseModel, Field
 
-from .auth import require_user
+from .auth import require_admin, require_user
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
@@ -198,6 +199,7 @@ def _dev_transcript(source: str, project_id: str, meeting_id: str) -> dict:
     return data
 
 
+@traceable(name="Clova STT and refinement", run_type="chain")
 def _transcribe_with_clova(audio_path: str, source: str, project_id: str, meeting_id: str, material_text: str | None = None) -> dict:
     clova = _load_stt_module("stt_clova")
 
@@ -251,14 +253,14 @@ def health() -> dict:
 
 
 @app.get("/api/admin/quality")
-def admin_quality() -> dict:
+def admin_quality(user: dict = Depends(require_admin)) -> dict:
     """관리자 대시보드 '품질' 탭 — 실측 WER 벤치마크(정적 데이터, backend/stt/quality_report.py 참고)."""
     quality_report = _load_stt_module("quality_report")
     return {"rows": quality_report.get_quality_rows()}
 
 
 @app.get("/api/admin/health")
-def admin_health() -> dict:
+def admin_health(user: dict = Depends(require_admin)) -> dict:
     """관리자 대시보드 '시스템' 탭 — STT 의존성(CLOVA/OpenAI/Soniox) 설정 여부 체크.
     비용 때문에 라이브 핑이 아니라 환경변수 presence만 확인함(backend/stt/health.py 참고)."""
     stt_health = _load_stt_module("health")
@@ -703,44 +705,54 @@ async def delete_source_graph(
     episode_ids: set[str] = set()
     client = _gsvx_client()
     meeting_ids: set[str] = set()
+    legacy_document_titles: set[str] = set()
     for record in records:
         payload = record.get("source_payload") or {}
+        stored_episode_ids: list[str] = []
         if isinstance(payload, dict):
-            episode_ids.update(
+            stored_episode_ids = [
                 str(value) for value in payload.get("graphEpisodeIds", []) if value
-            )
+            ]
+            episode_ids.update(stored_episode_ids)
             meeting_id = payload.get("graphMeetingId")
-            if isinstance(meeting_id, str) and meeting_id:
+            if not stored_episode_ids and isinstance(meeting_id, str) and meeting_id:
                 meeting_ids.add(meeting_id)
+        if not stored_episode_ids and record.get("kind") == "document":
+            legacy_document_titles.add(Path(str(record.get("original_name") or "자료")).stem)
 
-    # Compatibility for sources ingested before graphEpisodeIds was persisted.
-    for meeting_id in meeting_ids:
-        episode_ids.update(await run_in_threadpool(
+    # Compatibility lookups are independent network/Neo4j reads, so run them together.
+    lookup_tasks = [
+        run_in_threadpool(
             client.find_episode_ids,
             source["project_id"],
             meeting_id=meeting_id,
-        ))
-    for record in records:
-        if record.get("kind") != "document":
-            continue
-        title = Path(str(record.get("original_name") or "자료")).stem
-        episode_ids.update(await run_in_threadpool(
+        )
+        for meeting_id in meeting_ids
+    ]
+    lookup_tasks.extend(
+        run_in_threadpool(
             client.find_episode_ids,
             source["project_id"],
             title=title,
-        ))
+        )
+        for title in legacy_document_titles
+    )
+    if lookup_tasks:
+        for found_ids in await asyncio.gather(*lookup_tasks):
+            episode_ids.update(found_ids)
 
-    deleted = 0
-    for episode_id in episode_ids:
-        try:
-            await run_in_threadpool(client.delete_episode, episode_id)
-            deleted += 1
-        except Exception as exc:
-            from backend.integration.gsvx_connector import GsvxError
-            if isinstance(exc, GsvxError) and exc.status_code == 404:
-                continue
-            raise _graphiti_error(exc) from exc
-    return {"source_id": source_id, "episodes_deleted": deleted}
+    try:
+        delete_result = await run_in_threadpool(
+            client.delete_episodes,
+            sorted(episode_ids),
+        )
+    except Exception as exc:
+        raise _graphiti_error(exc) from exc
+    return {
+        "source_id": source_id,
+        "episodes_deleted": int(delete_result.get("episodes_deleted") or 0),
+        "orphan_entities_deleted": int(delete_result.get("entities_deleted") or 0),
+    }
 
 
 @app.get("/api/graph")
@@ -772,10 +784,17 @@ def _ndjson_event(event_type: str, **payload) -> str:
     return json.dumps({"type": event_type, **payload}, ensure_ascii=False) + "\n"
 
 
-def _ask_stream_events(project: str, q: str, k: int, meeting_id: str | None = None):
+def _ask_stream_events(
+    project: str,
+    q: str,
+    k: int,
+    meeting_id: str | None = None,
+    history: list[dict] | None = None,
+):
     """Adapt Graphiti's complete answer response to the frontend NDJSON contract."""
     try:
-        result = _gsvx_client().ask(project, q, k, meeting_id)
+        client = _gsvx_client()
+        result = client.ask(project, q, k, meeting_id, history=history) if history else client.ask(project, q, k, meeting_id)
         answer = str(result.get("answer") or "")
         for start in range(0, len(answer), 48):
             yield _ndjson_event("delta", text=answer[start:start + 48])
@@ -807,7 +826,13 @@ def ask_project_graph_stream_with_history(
     user: dict = Depends(require_user),
 ) -> StreamingResponse:
     return StreamingResponse(
-        _ask_stream_events(request.project, request.q, request.k, request.meeting_id),
+        _ask_stream_events(
+            request.project,
+            request.q,
+            request.k,
+            request.meeting_id,
+            [message.model_dump() for message in request.history],
+        ),
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
