@@ -409,6 +409,16 @@ function App() {
   const [workspaceLoadedProjectId, setWorkspaceLoadedProjectId] = useState<string | null>(null);
   const [graphReloadKey, setGraphReloadKey] = useState(0);
   const [chatGraphExpansion, setChatGraphExpansion] = useState<Set<string> | null>(null);
+  // 펼쳐진 인용 칩의 키(`${세션id}-${메시지index}-${n}`) — 채팅 세션이 바뀌면 키가 안 맞아 자연히 닫힌다.
+  const [openChatCitationKey, setOpenChatCitationKey] = useState<string | null>(null);
+  // 키에 대응하는 인용 데이터 — 그래프 모듈의 출처 드로어(노드 상세와 같은 자리)에 띄운다.
+  const openChatCitation = openChatCitationKey === null
+    ? null
+    : chatMessages.flatMap((message, index) =>
+        (message.citations ?? []).filter(
+          (citation) => `${activeChatSessionId}-${index}-${citation.n}` === openChatCitationKey,
+        ),
+      )[0] ?? null;
   const [isDetailAudioPlaying, setIsDetailAudioPlaying] = useState(false);
   const [detailAudioTimeLabel, setDetailAudioTimeLabel] = useState('00:00');
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -1901,9 +1911,13 @@ function App() {
           setGraphReloadKey((value) => value + 1);
         } catch (error) {
           console.error('전사 결과를 그래프에 반영하지 못했습니다:', error);
+          const message = error instanceof Error ? error.message : '';
+          const suffix = message.includes('이미 등록된')
+            ? ' · 그래프 반영됨 (중복 건너뜀)'
+            : ' · 그래프 반영 실패';
           setSourceItems((items) => items.map((source) => (
             source.id === recordingId
-              ? { ...source, meta: source.meta.replace(' · 그래프 분석 중', ' · 그래프 반영 실패') }
+              ? { ...source, meta: source.meta.replace(' · 그래프 분석 중', suffix) }
               : source
           )));
         }
@@ -2138,6 +2152,7 @@ function App() {
 
     void (async () => {
       let assistantText = '';
+      let assistantCitations: { n: number; sessionId: string; title: string; nodeIds?: string[]; fact?: string }[] = [];
       try {
         const response = await fetch(`${API_BASE}/api/ask-stream`, {
           method: 'POST',
@@ -2157,6 +2172,12 @@ function App() {
             text?: string;
             answer?: string;
             message?: string;
+            hits?: {
+              session_id?: string;
+              fact?: string;
+              node_ids?: string[];
+              sources?: { session_id: string; title: string }[];
+            }[];
             expansion?: { nodes?: { id: string }[] };
           };
           if (event.type === 'delta') {
@@ -2166,6 +2187,19 @@ function App() {
             }
           } else if (event.type === 'complete') {
             assistantText = event.answer ?? assistantText;
+            // 답변 [n] 인용 번호는 hits 배열 순서와 1:1 — 각 fact의 첫 출처 에피소드를 칩으로.
+            assistantCitations = (event.hits ?? []).flatMap((hit, hitIndex) => {
+              const source = hit.sources?.[0];
+              return source
+                ? [{
+                    n: hitIndex + 1,
+                    sessionId: source.session_id,
+                    title: source.title,
+                    nodeIds: hit.node_ids ?? [],
+                    fact: hit.fact ?? '',
+                  }]
+                : [];
+            });
             if (chatLoadRequestRef.current === requestId) {
               setChatGraphExpansion(new Set((event.expansion?.nodes ?? []).map((node) => node.id)));
             }
@@ -2194,7 +2228,11 @@ function App() {
       const completedMessages: StoredChatMessage[] = [
         ...chatMessages,
         userMessage,
-        { role: 'assistant', text: assistantText },
+        {
+          role: 'assistant',
+          text: assistantText,
+          ...(assistantCitations.length > 0 ? { citations: assistantCitations } : {}),
+        },
       ];
       if (chatLoadRequestRef.current === requestId) {
         setChatMessages(completedMessages);
@@ -3241,6 +3279,14 @@ function App() {
                   projectName={activeProject.name}
                   reloadKey={graphReloadKey}
                   askExpansionIds={chatGraphExpansion}
+                  citation={openChatCitation
+                    ? { n: openChatCitation.n, title: openChatCitation.title, fact: openChatCitation.fact ?? '' }
+                    : null}
+                  onCitationClose={() => setOpenChatCitationKey(null)}
+                  onResetFocus={() => {
+                    setChatGraphExpansion(null);
+                    setOpenChatCitationKey(null);
+                  }}
                 />
               </section>
 
@@ -3344,6 +3390,30 @@ function App() {
                       </Suspense>
                     ) : (
                       <p>{message.text || '답변 생성 중…'}</p>
+                    )}
+                    {message.citations !== undefined && message.citations.length > 0 && (
+                      <div className="chat-citations">
+                        {message.citations.map((citation) => {
+                          const citationKey = `${activeChatSessionId}-${index}-${citation.n}`;
+                          const isOpen = openChatCitationKey === citationKey;
+                          return (
+                            <button
+                              key={`${index}-${citation.n}`}
+                              type="button"
+                              className={`chat-citation${isOpen ? ' chat-citation--open' : ''}`}
+                              title={`${citation.title} — 근거 내용 보기 + 그래프에서 세션·개념 강조`}
+                              onClick={() => {
+                                setChatGraphExpansion(
+                                  new Set([citation.sessionId, ...(citation.nodeIds ?? [])]),
+                                );
+                                setOpenChatCitationKey(isOpen ? null : citationKey);
+                              }}
+                            >
+                              [{citation.n}] {citation.title}
+                            </button>
+                          );
+                        })}
+                      </div>
                     )}
                   </article>
                 ))}
