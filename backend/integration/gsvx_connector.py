@@ -8,6 +8,7 @@ grounded AI answers while scoping every operation by the project group_id.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import types
@@ -78,6 +79,18 @@ def document_title(stem: str, meeting_id: str | None = None) -> str:
     파일)에 딸린 자료인지 그래프 뷰에서도 식별 가능하게 한다. meeting_id 없으면(프로젝트
     전역 자료) 기존과 동일하게 stem 그대로."""
     return f"{stem} ({meeting_id})" if meeting_id else stem
+
+
+def source_metadata(kind: str, file: str, project: str | None,
+                    meeting_id: str | None = None) -> str:
+    """에피소드 source_description에 넣는 추적 메타데이터(compact JSON).
+
+    graphiti_host의 미팅 필터가 '"meeting_id":"<id>"' 부분 문자열 매칭으로 이 형식에
+    의존하므로 separators(공백 없음)를 바꾸면 안 된다."""
+    return json.dumps(
+        {"kind": kind, "file": file, "project_id": project, "meeting_id": meeting_id},
+        ensure_ascii=False, separators=(",", ":"),
+    )
 
 
 def split_for_ingest(text: str, limit: int = GSVX_TEXT_LIMIT,
@@ -541,7 +554,12 @@ class GsvxClient:
             [chunk["text"] for chunk in chunks],
             transcript_title(im),
             project=project or im.get("project_id"),
-            source_description=f"meeting:{im['meeting_id']}",
+            source_description=source_metadata(
+                "transcript",
+                transcript_title(im),
+                project or im.get("project_id"),
+                im["meeting_id"],
+            ),
         )
 
     def ingest_document(self, path: Path | str, project: str | None = None,
@@ -566,6 +584,7 @@ class GsvxClient:
             [chunk["text"] for chunk in chunks],
             document_title(title, meeting_id),
             project=project,
+            source_description=source_metadata("document", title, project, meeting_id),
         )
 
     def _ingest_chunks(
