@@ -226,6 +226,68 @@ def test_refine_transcript_accumulates_partial_across_retries():
     assert client.batch_ids == [[0, 1], [1]]  # 초기 전체 + 누락분만
 
 
+def test_refine_transcript_360_segments_split_into_six_batches():
+    segments = [
+        {
+            "id": index,
+            "speaker": "A",
+            "start": float(index),
+            "end": float(index + 1),
+            "text": f"원문 {index}",
+        }
+        for index in range(360)
+    ]
+    client = _FakeRefinementClient()
+
+    result = refine_transcript(
+        {"source": "lecture.wav", "segments": segments},
+        material_text="강의 자료",
+        client=client,
+    )
+
+    # 병렬 실행이라 호출 순서는 비결정적 — 배치 크기 구성만 검증하고,
+    # 최종 병합이 원본 세그먼트 순서를 복원하는지 확인한다.
+    assert sorted(len(ids) for ids in client.batch_ids) == [60] * 6
+    assert [segment["id"] for segment in result["segments"]] == list(range(360))
+    assert result["segments"][0]["text"] == "원문 0 교정"
+    assert result["segments"][359]["text"] == "원문 359 교정"
+
+
+class _FailingBatchClient(_FakeRefinementClient):
+    """id 60이 포함된 배치에만 항상 깨진 JSON을 돌려주는 클라이언트."""
+
+    def create(self, **request):
+        prompt = request["messages"][0]["content"]
+        transcript = prompt.split("# 전사문 세그먼트 (JSON)\n", 1)[1].split(
+            "\n\n# 출력 형식", 1
+        )[0]
+        if any(segment["id"] == 60 for segment in json.loads(transcript)):
+            return _FakeCompletionResponse("not json")
+        return super().create(**request)
+
+
+def test_refine_transcript_raises_when_a_batch_gets_nothing_usable():
+    """한 배치가 끝까지 아무 교정도 못 받으면(깨진 JSON 반복) 예외로 전파된다 —
+    호출부(api/main.py)의 except가 1차 전사문을 그대로 유지한다."""
+    segments = [
+        {
+            "id": index,
+            "speaker": "A",
+            "start": float(index),
+            "end": float(index + 1),
+            "text": f"원문 {index}",
+        }
+        for index in range(120)
+    ]
+
+    with pytest.raises(RuntimeError, match="batch failed"):
+        refine_transcript(
+            {"source": "lecture.wav", "segments": segments},
+            material_text="강의 자료",
+            client=_FailingBatchClient(),
+        )
+
+
 class _FakeVectorStore:
     """retrieve_relevant_context()가 저장 대상으로 넘긴 청크 중, "결제" 청크만 관련 있다고
     가정하고 되돌려주는 스텁 — 실제 pgvector 쿼리 랭킹 로직은 backend.graphrag 쪽 책임."""
