@@ -187,6 +187,8 @@ def test_transcript_is_ingested_as_one_episode_by_default():
 
 
 def test_ingest_transcript_source_description_carries_tracking_metadata():
+    from datetime import datetime, timezone
+
     client = _RecordingClient()
     client.ingest_transcript(_intermediate())
 
@@ -196,7 +198,10 @@ def test_ingest_transcript_source_description_carries_tracking_metadata():
         "file": "meeting.m4a",
         "project_id": "P01",
         "meeting_id": "M01",
+        "date": "2026-07-15",
     }
+    # 중간포맷 date가 에피소드 시간축(reference_time)으로 쓰인다
+    assert client.calls[0]["reference_time"] == datetime(2026, 7, 15, tzinfo=timezone.utc)
 
 
 def test_ingest_document_text_source_description_carries_tracking_metadata():

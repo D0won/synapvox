@@ -584,6 +584,15 @@ class GsvxClient:
         _tag_langsmith_run(
             project_id=project or im.get("project_id"), meeting_id=im.get("meeting_id"))
         started = time.perf_counter()
+        # 중간포맷의 date(YYYY-MM-DD)를 에피소드 시간축으로 사용 — 자료의 content_date와
+        # 동일한 규칙. 값이 없거나 형식이 어긋나면 기존과 동일하게 적재 시각.
+        content_date = str(im.get("date") or "") or None
+        reference_time = None
+        if content_date:
+            try:
+                reference_time = datetime.fromisoformat(content_date).replace(tzinfo=timezone.utc)
+            except ValueError:
+                content_date = None
         max_chars = int(os.getenv("GRAPHITI_CHUNK_CHARS") or DEFAULT_GRAPHITI_CHUNK_CHARS)
         chunks = chunk_transcript(im, max_chars=max_chars)
         result = self._ingest_chunks(
@@ -595,7 +604,9 @@ class GsvxClient:
                 transcript_title(im),
                 project or im.get("project_id"),
                 im["meeting_id"],
+                content_date=content_date,
             ),
+            reference_time=reference_time,
         )
         logger.info(
             "graphiti.ingest transcript project=%s meeting=%s chunks=%d elapsed=%.2fs",
