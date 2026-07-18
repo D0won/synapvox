@@ -722,11 +722,23 @@ async def ingest_doc_to_graph(
     x_project_id: str | None = Header(None, alias="X-Project-Id"),
     x_meeting_id: str | None = Header(None, alias="X-Meeting-Id"),
     x_source_id: str | None = Header(None, alias="X-Source-Id"),
+    x_content_date: str | None = Header(None, alias="X-Content-Date"),
     user: dict = Depends(require_user),
 ) -> dict:
-    """자료 텍스트를 현재 프로젝트에 적재한다. X-Meeting-Id가 있으면 해당 녹음본에 연결한다."""
+    """자료 텍스트를 현재 프로젝트에 적재한다. X-Meeting-Id가 있으면 해당 녹음본에 연결한다.
+
+    X-Content-Date(YYYY-MM-DD)는 사용자가 지정한 자료의 실제 날짜 — 그래프 시간축에
+    쓰인다. 생략 시 적재 시각(오늘)."""
     if not x_project_id:
         raise HTTPException(status_code=400, detail="X-Project-Id is required")
+    if x_content_date:
+        try:
+            date.fromisoformat(x_content_date)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail="X-Content-Date는 YYYY-MM-DD 형식이어야 합니다.",
+            ) from None
     user_id = str(user.get("sub") or "")
     if x_source_id:
         source = await run_in_threadpool(_owned_source_record, user_id, x_source_id)
@@ -758,6 +770,7 @@ async def ingest_doc_to_graph(
                 title,
                 x_project_id,
                 x_meeting_id,
+                x_content_date,
             )
             if x_source_id:
                 await run_in_threadpool(

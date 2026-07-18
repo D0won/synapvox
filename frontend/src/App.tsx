@@ -360,6 +360,10 @@ function App() {
   });
   const [isProjectTitleEditing, setIsProjectTitleEditing] = useState(false);
   const [isSourceEditing, setIsSourceEditing] = useState(false);
+  // 자료의 실제 날짜(사용자 지정) — 그래프 시간축(reference_time)에 쓰인다. 기본: 오늘.
+  const [sourceContentDate, setSourceContentDate] = useState<string>(
+    () => new Date().toISOString().slice(0, 10),
+  );
   const [pendingSourceDeletion, setPendingSourceDeletion] = useState<SourceItem | null>(null);
   const [sourceDeletionState, setSourceDeletionState] = useState<'idle' | 'deleting'>('idle');
   const [sourceDeletionError, setSourceDeletionError] = useState<string | null>(null);
@@ -1426,6 +1430,7 @@ function App() {
     itemId: string,
     projectId: string | null,
     meetingId?: string,
+    contentDate?: string,
   ) => {
     const markMeta = (suffix: string) => setSourceItems((items) => items.map((source) => (
       source.id === itemId ? { ...source, meta: `자료 · ${formatFileSize(file.size)} · ${suffix}` } : source
@@ -1439,6 +1444,7 @@ function App() {
         headers: {
           ...(await apiHeaders(projectId, meetingId)),
           'X-Source-Id': itemId,
+          ...(contentDate ? { 'X-Content-Date': contentDate } : {}),
         },
         body: form,
       });
@@ -1516,6 +1522,8 @@ function App() {
     const nextMaterials = createMaterialItems(fileList, 'material', 'project');
     if (nextMaterials.length === 0) return 0;
     const projectId = activeProjectId;
+    // 모달의 자료 날짜를 추가 시점에 캡처 — 비동기 적재 중 입력이 바뀌어도 안전.
+    const contentDate = sourceContentDate;
 
     if (projectId !== null) {
       projectMaterialFilesRef.current[projectId] = [
@@ -1552,7 +1560,7 @@ function App() {
               .map((entry) => entry.source.id === persistedSource.id ? { ...entry, source: persistedSource } : entry);
           }
           if (isGraphIngestibleDocument(file)) {
-            await uploadMaterialToGraph(file, nextMaterials[index].id, projectId);
+            await uploadMaterialToGraph(file, nextMaterials[index].id, projectId, undefined, contentDate);
           }
         } catch (error) {
           console.error('프로젝트 자료 저장 실패:', error);
@@ -3662,6 +3670,15 @@ function App() {
 
             {sourceModalMode === 'source' ? (
               <>
+                <label className="source-date-field">
+                  <span>자료 날짜</span>
+                  <input
+                    type="date"
+                    value={sourceContentDate}
+                    onChange={(event) => setSourceContentDate(event.target.value)}
+                  />
+                  <small>강의·작성된 실제 날짜 — 그래프 시간축에 사용됩니다 (기본: 오늘)</small>
+                </label>
                 <div
                   className="source-dropzone"
                   role="button"
