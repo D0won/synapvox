@@ -12,6 +12,7 @@ import GraphView from './graph/GraphView'
 import type { FNode } from './graph/buildForceData'
 import { AnswerDrawer } from './ask/AnswerDrawer'
 import { useAsk } from './ask/useAsk'
+import { CitationDrawer } from './detail/CitationDrawer'
 import { DetailDrawer } from './detail/DetailDrawer'
 import { useDetail } from './detail/useDetail'
 import './graphmodule.css'
@@ -21,11 +22,16 @@ export default function GraphModule({
   projectName,
   reloadKey = 0,
   askExpansionIds = null,
+  citation = null,
+  onCitationClose,
 }: {
   project: string | null
   projectName: string
   reloadKey?: number
   askExpansionIds?: Set<string> | null
+  // AI 채팅 인용 칩에서 넘어오는 근거 상세 — 있으면 노드 상세와 같은 드로어 자리에 띄운다.
+  citation?: { n: number; title: string; fact: string } | null
+  onCitationClose?: () => void
 }) {
   const [meta, setMeta] = useState({ nodes: 0, edges: 0, settled: false })
   const [detailAskExpansion, setDetailAskExpansion] = useState<Set<string> | null>(null)
@@ -41,17 +47,25 @@ export default function GraphModule({
   )
   const onSelectNode = useCallback(
     (n: FNode) => {
+      onCitationClose?.() // 노드를 누르면 인용 드로어 대신 노드 상세를 보여준다
       detail.open(n)
       setPanel('detail')
     },
-    [detail],
+    [detail, onCitationClose],
   )
   const closeDrawer = useCallback(() => {
     setPanel(null)
     detail.close()
     ask.clear()
   }, [detail, ask])
-  const drawer =
+  const drawer = citation ? (
+    <CitationDrawer
+      n={citation.n}
+      title={citation.title}
+      fact={citation.fact}
+      onClose={() => onCitationClose?.()}
+    />
+  ) :
     panel === 'detail' && detail.state.status !== 'idle' ? (
       <DetailDrawer
         state={detail.state}

@@ -5096,6 +5096,12 @@ h3 {
   border-color: var(--ink);
 }
 
+.chat-citation--open {
+  color: var(--ink);
+  border-color: var(--ink);
+  background: rgba(255, 255, 255, 1);
+}
+
 .chat-markdown {
   min-width: 0;
   overflow-wrap: anywhere;

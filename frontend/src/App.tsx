@@ -409,6 +409,16 @@ function App() {
   const [workspaceLoadedProjectId, setWorkspaceLoadedProjectId] = useState<string | null>(null);
   const [graphReloadKey, setGraphReloadKey] = useState(0);
   const [chatGraphExpansion, setChatGraphExpansion] = useState<Set<string> | null>(null);
+  // 펼쳐진 인용 칩의 키(`${세션id}-${메시지index}-${n}`) — 채팅 세션이 바뀌면 키가 안 맞아 자연히 닫힌다.
+  const [openChatCitationKey, setOpenChatCitationKey] = useState<string | null>(null);
+  // 키에 대응하는 인용 데이터 — 그래프 모듈의 출처 드로어(노드 상세와 같은 자리)에 띄운다.
+  const openChatCitation = openChatCitationKey === null
+    ? null
+    : chatMessages.flatMap((message, index) =>
+        (message.citations ?? []).filter(
+          (citation) => `${activeChatSessionId}-${index}-${citation.n}` === openChatCitationKey,
+        ),
+      )[0] ?? null;
   const [isDetailAudioPlaying, setIsDetailAudioPlaying] = useState(false);
   const [detailAudioTimeLabel, setDetailAudioTimeLabel] = useState('00:00');
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -2138,7 +2148,7 @@ function App() {
 
     void (async () => {
       let assistantText = '';
-      let assistantCitations: { n: number; sessionId: string; title: string; nodeIds?: string[] }[] = [];
+      let assistantCitations: { n: number; sessionId: string; title: string; nodeIds?: string[]; fact?: string }[] = [];
       try {
         const response = await fetch(`${API_BASE}/api/ask-stream`, {
           method: 'POST',
@@ -2160,6 +2170,7 @@ function App() {
             message?: string;
             hits?: {
               session_id?: string;
+              fact?: string;
               node_ids?: string[];
               sources?: { session_id: string; title: string }[];
             }[];
@@ -2176,7 +2187,13 @@ function App() {
             assistantCitations = (event.hits ?? []).flatMap((hit, hitIndex) => {
               const source = hit.sources?.[0];
               return source
-                ? [{ n: hitIndex + 1, sessionId: source.session_id, title: source.title, nodeIds: hit.node_ids ?? [] }]
+                ? [{
+                    n: hitIndex + 1,
+                    sessionId: source.session_id,
+                    title: source.title,
+                    nodeIds: hit.node_ids ?? [],
+                    fact: hit.fact ?? '',
+                  }]
                 : [];
             });
             if (chatLoadRequestRef.current === requestId) {
@@ -3258,6 +3275,10 @@ function App() {
                   projectName={activeProject.name}
                   reloadKey={graphReloadKey}
                   askExpansionIds={chatGraphExpansion}
+                  citation={openChatCitation
+                    ? { n: openChatCitation.n, title: openChatCitation.title, fact: openChatCitation.fact ?? '' }
+                    : null}
+                  onCitationClose={() => setOpenChatCitationKey(null)}
                 />
               </section>
 
@@ -3364,19 +3385,26 @@ function App() {
                     )}
                     {message.citations !== undefined && message.citations.length > 0 && (
                       <div className="chat-citations">
-                        {message.citations.map((citation) => (
-                          <button
-                            key={`${index}-${citation.n}`}
-                            type="button"
-                            className="chat-citation"
-                            title={`${citation.title} — 그래프에서 이 근거의 세션·개념 강조`}
-                            onClick={() => setChatGraphExpansion(
-                              new Set([citation.sessionId, ...(citation.nodeIds ?? [])]),
-                            )}
-                          >
-                            [{citation.n}] {citation.title}
-                          </button>
-                        ))}
+                        {message.citations.map((citation) => {
+                          const citationKey = `${activeChatSessionId}-${index}-${citation.n}`;
+                          const isOpen = openChatCitationKey === citationKey;
+                          return (
+                            <button
+                              key={`${index}-${citation.n}`}
+                              type="button"
+                              className={`chat-citation${isOpen ? ' chat-citation--open' : ''}`}
+                              title={`${citation.title} — 근거 내용 보기 + 그래프에서 세션·개념 강조`}
+                              onClick={() => {
+                                setChatGraphExpansion(
+                                  new Set([citation.sessionId, ...(citation.nodeIds ?? [])]),
+                                );
+                                setOpenChatCitationKey(isOpen ? null : citationKey);
+                              }}
+                            >
+                              [{citation.n}] {citation.title}
+                            </button>
+                          );
+                        })}
                       </div>
                     )}
                   </article>
