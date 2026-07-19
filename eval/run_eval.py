@@ -95,8 +95,14 @@ def retrieval_metrics(item: dict, hits: list[dict]) -> dict:
                 matched.add(gold)
                 if first_rank is None:
                     first_rank = rank
+    # multi_hop은 두 세션을 잇는 질문이라 gold 전부 회수해야 성공 — 하나만 잡으면
+    # "연결 실패"인데 관대 기준으로는 B vs C 격차(§4 핵심 주장)가 측정되지 않는다.
+    if item["question_type"] == "multi_hop":
+        hit = matched == set(golds)
+    else:
+        hit = bool(matched)
     return {
-        "hit": bool(matched),
+        "hit": hit,
         "rank": first_rank,
         "gold_recall": (len(matched) / len(golds)) if golds else None,
     }
@@ -201,8 +207,11 @@ def aggregate(records: list[dict]) -> dict:
         judged = [r for r in group if "correctness" in r]
         abstains = [r for r in group if r["question_type"] == "abstain"]
         ranks = [r["rank"] for r in scored if r.get("rank")]
+        recalls = [r["gold_recall"] for r in scored if r.get("gold_recall") is not None]
         return {
             "n": len(group),
+            # 부분 회수율 — multi_hop 엄격 hit(전부 회수)과 함께 보면 "반쪽 회수"가 보인다
+            "gold_recall_avg": round(sum(recalls) / len(recalls), 4) if recalls else None,
             "hit_rate": _ratio(sum(1 for r in scored if r.get("hit")), len(scored)),
             "mrr": round(sum(1 / rank for rank in ranks) / len(scored), 4) if scored else None,
             "correctness_avg": round(
@@ -410,6 +419,10 @@ def self_test() -> None:
                 return {"answer": "보폭을 결정한다 [1]", "hits": [
                     {"fact": "무관한 fact", "sources": [{"title": "다른 자료.pdf"}]},
                 ]}
+            if "연결" in question:  # q-006: gold 2개 중 1개만 회수 — multi_hop 엄격 기준 miss 검증
+                return {"answer": "학습률 보폭이 발산 사례와 연결된다 [1]", "hits": [
+                    {"fact": "학습률이 크면 발산", "sources": [{"title": "3주차 강의.m4a"}]},
+                ]}
             if "처음" in question:  # q-005: 시점 miss + 인용 없는 답 (citation recall 저하 검증)
                 return {"answer": "probit이 기본이다", "hits": [
                     {"fact": "기본 링크를 probit으로 교체", "sources": [{"title": "개정판 노트"}]},
@@ -435,18 +448,21 @@ def self_test() -> None:
     result = run("self-test-project", goldset, k=6, judge_model="fake",
                  client=_FakeClient(), judge=_fake_judge)
     overall = result["metrics"]["overall"]
-    assert overall["n"] == 5, overall
-    assert overall["hit_rate"] == 0.5, overall       # scored 4문항 중 q-001·q-004 hit
-    assert overall["mrr"] == 0.5, overall            # (1 + 0 + 1 + 0) / 4
+    assert overall["n"] == 6, overall
+    assert overall["hit_rate"] == 0.4, overall       # scored 5문항 중 q-001·q-004 hit (q-006은 엄격 기준 miss)
+    assert overall["mrr"] == 0.6, overall            # (1 + 0 + 1 + 0 + 1) / 5
     assert overall["abstain_accuracy"] == 1.0, overall
-    assert overall["citation_recall"] == 0.75, overall  # 4개 주장 중 q-005만 인용 없음
+    assert overall["citation_recall"] == 0.8, overall  # 5개 주장 중 q-005만 인용 없음
     assert result["metrics"]["by_type"]["abstain"]["n"] == 1
     # temporal 분리 집계(§1①) — current는 올바른 시점(T2) 회수, historical은 시점 오류로 miss
     assert result["metrics"]["by_type"]["temporal"]["n"] == 2
     assert result["metrics"]["by_type"]["temporal(current)"]["hit_rate"] == 1.0
     assert result["metrics"]["by_type"]["temporal(historical)"]["hit_rate"] == 0.0
+    # multi_hop 엄격 기준 — gold 2개 중 1개만 회수하면 hit=0, 부분 회수는 gold_recall로 보임
+    assert result["metrics"]["by_type"]["multi_hop"]["hit_rate"] == 0.0
+    assert result["metrics"]["by_type"]["multi_hop"]["gold_recall_avg"] == 0.5
     failure_ids = [failure["id"] for failure in result["failures"]]
-    assert failure_ids == ["q-002", "q-005"], failure_ids  # q-002: miss+환각+나쁜인용 / q-005: 시점 miss
+    assert failure_ids == ["q-002", "q-005", "q-006"], failure_ids  # 미스·시점미스·연결실패
     print_report(result)
     print("\n✅ self-test 통과 — 하네스 배관 정상")
 

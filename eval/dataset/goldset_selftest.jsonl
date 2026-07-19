@@ -3,3 +3,4 @@
 {"id": "q-003", "question": "이 강의에서 트랜스포머를 다뤘나?", "question_type": "abstain", "gold_answer": "다루지 않았다 — 근거 없음을 명확히 답해야 한다.", "gold_sources": [], "gold_concepts": []}
 {"id": "q-004", "question": "지금 기본 링크 함수는 무엇인가?", "question_type": "temporal", "temporal_kind": "current", "gold_answer": "probit", "gold_sources": ["개정판 노트"], "gold_concepts": ["링크 함수"]}
 {"id": "q-005", "question": "처음에 기본 링크 함수는 무엇이었나?", "question_type": "temporal", "temporal_kind": "historical", "gold_answer": "logit", "gold_sources": ["초판 노트"], "gold_concepts": ["링크 함수"]}
+{"id": "q-006", "question": "경사하강법 강의와 3장 슬라이드 내용은 어떻게 연결되나?", "question_type": "multi_hop", "gold_answer": "학습률 보폭 개념이 발산 사례와 연결된다.", "gold_sources": ["3주차 강의.m4a", "3장 슬라이드.pdf"], "gold_concepts": ["경사하강법", "학습률"]}
