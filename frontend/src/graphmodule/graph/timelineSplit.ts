@@ -83,7 +83,16 @@ export function splitSharedForTimeline(data: GraphData): GraphData {
     }
   }
 
-  // degree/neighbors 재계산(사본은 링크가 재배분됐으므로)
+  // 같은 개념의 사본들을 점선으로 이어 '원래 한 노드였음'을 표시(연결 상태 유지).
+  // dashed 링크는 렌더만 하고 force는 0으로 둬야 사본이 다시 뭉치지 않는다(GraphView).
+  for (const c of shared) {
+    const copies = [...(mentioners.get(c) ?? [])].map((s) => copyId(c, s))
+    for (let i = 0; i + 1 < copies.length; i++) {
+      links.push({ source: copies[i], target: copies[i + 1], relClass: 'cooccur', dashed: true })
+    }
+  }
+
+  // degree/neighbors 재계산(점선 사본 링크는 제외 — 반지름·hover를 부풀리지 않게)
   const byNew = new Map(nodes.map((n) => [n.id, n]))
   for (const n of nodes) {
     if (shared.has(n.id)) continue // 원본 공유 개념은 nodes에 없음
@@ -91,6 +100,7 @@ export function splitSharedForTimeline(data: GraphData): GraphData {
     n.neighbors = new Set<string>()
   }
   for (const l of links) {
+    if (l.dashed) continue
     const a = byNew.get(endId(l.source))
     const b = byNew.get(endId(l.target))
     if (a) { a.degree += 1; a.neighbors.add(endId(l.target)) }

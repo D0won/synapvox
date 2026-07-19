@@ -27,6 +27,7 @@ export type FLink = {
   source: string
   target: string
   relClass: FRelClass
+  dashed?: boolean // 시간순 모드의 사본-사본 연결(같은 개념 표시) — 점선 렌더 + force 0
 }
 
 export function buildForceData(mapped: {

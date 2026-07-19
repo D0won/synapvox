@@ -322,6 +322,8 @@ export const GraphView = forwardRef<GraphViewHandle, GraphViewProps>(function Gr
         return 33
       })
       link?.strength?.((l) => {
+        // 사본-사본 점선 링크는 시각 전용 — 힘 0이라야 사본이 각 세션으로 흩어진 채 유지된다
+        if ((l as { dashed?: boolean }).dashed) return 0
         const s = typeof l.source === 'object' ? l.source.type : undefined
         const t = typeof l.target === 'object' ? l.target.type : undefined
         if (s === 'main' || t === 'main') return 0.18
@@ -364,7 +366,7 @@ export const GraphView = forwardRef<GraphViewHandle, GraphViewProps>(function Gr
     if (!displayData) return
     const sessions = displayData.nodes.filter((n) => n.type === 'session')
     if (!timelineMode) {
-      for (const s of sessions) s.fx = undefined
+      for (const s of sessions) { s.fx = undefined; s.fy = undefined }
       fg?.d3ReheatSimulation()
       return
     }
@@ -376,10 +378,12 @@ export const GraphView = forwardRef<GraphViewHandle, GraphViewProps>(function Gr
     const min = Math.min(...times)
     const max = Math.max(...times)
     // 세션 수에 비례해 좌우로 펼친다(원점 중심). 날짜가 같으면 가운데.
+    // 사각형 세션은 fy=0으로 고정해 가로축 한 줄에 시간순 나열(개념 사본은 위아래로 매달림).
     const spread = Math.max(dated.length * 130, 260)
     for (const { s, t } of dated) {
       const frac = max > min ? (t - min) / (max - min) : 0.5
       s.fx = (frac - 0.5) * spread
+      s.fy = 0
     }
     fg?.d3ReheatSimulation()
   }, [timelineMode, displayData])
@@ -627,12 +631,15 @@ export const GraphView = forwardRef<GraphViewHandle, GraphViewProps>(function Gr
           nodePointerAreaPaint={paintPointer}
           linkColor={linkColorAccessor}
           linkWidth={(l: LinkObject<FNode, FLink>) =>
-            l.relClass === 'next' || l.relClass === 'continues'
+            l.dashed
+              ? 0.5
+              : l.relClass === 'next' || l.relClass === 'continues'
                 ? 0.9
                 : l.relClass === 'mentions'
                   ? 0.28
                   : 0.6
           }
+          linkLineDash={(l: LinkObject<FNode, FLink>) => (l.dashed ? [2, 4] : null)}
           onNodeHover={handleNodeHover}
           onNodeClick={handleNodeClick}
           onEngineStop={handleEngineStop}
