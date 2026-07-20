@@ -2870,10 +2870,10 @@ function App() {
         ) : !isLoggedIn ? (
           <section className="signed-out-home" aria-label="login required">
             <div className="signed-out-copy">
-              <p className="eyebrow">Lecture knowledge pipeline</p>
-              <h1>강의 지식을 한 흐름으로 정리하세요.</h1>
+              <p className="eyebrow">Recording knowledge pipeline</p>
+              <h1>녹음과 자료를 하나의 지식 흐름으로 연결하세요.</h1>
               <p>
-                강의 녹음, 수업 자료, 필기를 프로젝트로 묶고 전사문과 지식 그래프로 이어서 복습합니다.
+                강의, 회의, 인터뷰의 녹음과 관련 자료를 한곳에 모아 전사문과 지식 그래프로 연결합니다.
               </p>
               <div className="signed-out-actions">
                 <button className="auth-submit" type="button" onClick={() => setAuthMode('login')}>
@@ -2888,12 +2888,12 @@ function App() {
             <div className="signed-out-preview" aria-hidden="true">
               <div className="preview-column preview-sources">
                 <span>Sources</span>
-                <strong>오늘 강의 녹음</strong>
-                <strong>강의 슬라이드</strong>
-                <strong>수업 필기</strong>
+                <strong>녹음 기록</strong>
+                <strong>참고 자료</strong>
+                <strong>개인 메모</strong>
               </div>
               <div className="preview-graph">
-                <svg className="preview-graph-svg" viewBox="0 0 300 420" role="img" aria-label="강의 지식 그래프 예시">
+                <svg className="preview-graph-svg" viewBox="0 0 300 420" role="img" aria-label="녹음과 자료로 만든 지식 그래프 예시">
                   <line className="preview-link one" x1="92" y1="126" x2="150" y2="214" pathLength={1} />
                   <line className="preview-link two" x1="224" y1="114" x2="150" y2="214" pathLength={1} />
                   <line className="preview-link three" x1="190" y1="330" x2="150" y2="214" pathLength={1} />
@@ -2907,9 +2907,9 @@ function App() {
               </div>
               <div className="preview-column preview-chat">
                 <span>AI</span>
-                <p className="preview-question">“오늘 강의에서 시험에 나올 만한 부분만 정리해줘.”</p>
+                <p className="preview-question">“녹음과 자료를 바탕으로 핵심 내용과 결정 사항을 정리해줘.”</p>
                 <div className="preview-answer">
-                  교수님이 강조한 개념과 슬라이드 근거를 묶어 핵심 흐름만 정리했어요.
+                  녹음에서 언급된 내용과 관련 자료의 근거를 연결해 정리했어요.
                 </div>
                 <strong>근거 4개 연결</strong>
               </div>
