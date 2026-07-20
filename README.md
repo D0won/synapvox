@@ -16,6 +16,15 @@
 | [`backend/integration/`](backend/integration/) | 통합 API/E2E (PM) | 도원 | (없음 — 통합) |
 | [`frontend/`](frontend/) | 그래프 시각화 UI (PM) | 도원 | (없음 — `backend/integration` API 소비) |
 
+## Contributors
+
+| 이름 | 역할 | 담당 영역 |
+| --- | --- | --- |
+| 현우 | STT 담당 | 2-pass STT 파이프라인, 중간 포맷 JSON 스키마 |
+| 도윤 | Chunking 담당 | 청킹, LLM 기반 Topic/Decision/ActionItem 추출 |
+| 용하 | GraphRAG 담당 | Vector/Graph DB, Graphiti 적재, 하이브리드 검색 |
+| 도원 | PM / Integration / Frontend 담당 | 통합 API, E2E 파이프라인, 그래프 시각화 UI |
+
 ## 그 외 디렉터리
 
 - `schemas/` — 3개 계약 스키마 원본 (JSON Schema / 문서). 언어 무관이라 최상위에 둠. 변경 시 소유자가 제안하고 영향받는 담당자 합의 후 반영.
